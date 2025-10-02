@@ -46,10 +46,6 @@ class UnetActorCategorical(nn.Module):
 
         if pretrain_ckpt:
             # if starting from pretrained model, keep version of
-
-            # FOR UDAS TESTING
-            # self.net.init_path = self.net.layer1
-
             self.net.load_state_dict(torch.load(pretrain_ckpt))
 
             if ref_ckpt:

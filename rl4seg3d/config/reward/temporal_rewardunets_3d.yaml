@@ -1,0 +1,14 @@
+defaults:
+  - /model/net@net: unet
+
+_target_: rl4seg3d.reward.temporal_reward_nets_3d.TemporalRewardUnets3D
+
+state_dict_paths:
+  anatomical: null #<PATH_TO_ANATOMICAL>
+  landmarks: null #<PATH_TO_LM>
+
+temp_factor: 1
+
+net:
+  in_channels: 2
+  num_classes: 1

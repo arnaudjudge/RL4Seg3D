@@ -1,0 +1,22 @@
+work_dir: ${hydra:runtime.cwd}
+run_name: default
+
+defaults:
+  - logger: comet
+  - model: ppo
+  - datamodule: ???
+  - callbacks: default
+  - experiment: ppo_icardio_3d
+  - _self_
+
+
+seed: 1
+
+ckpt_path: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/rl4seg3d_LM+ANAT_best.ckpt
+
+trainer:
+  _target_: lightning.pytorch.Trainer
+  log_every_n_steps: 1
+  accelerator: gpu
+  devices: 1
+#  num_sanity_val_steps: 0 # skip sanity check (convenient for debugging directly in train step)

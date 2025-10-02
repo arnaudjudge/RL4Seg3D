@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - override /model: ppo_3d
+  - override /datamodule: icardio_3d
+  - override /actor/actor@model.actor.actor: categorical_3d_unet_actor
+  - override /reward@model.reward: rewardunets_3d
+  - override /corrector@model.corrector: none
+
+datamodule:
+  supervised: False
+
+run_name: icardio3d

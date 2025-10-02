@@ -1,0 +1,7 @@
+defaults:
+  - default_actor
+  - override actor: categorical_3d_unet_actor
+  - override critic: 3d_unet_critic
+  - _self_
+
+_target_: rl4seg3d.actors.ActorCritic_Unet.ActorCriticUnetCritic

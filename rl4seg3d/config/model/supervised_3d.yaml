@@ -1,0 +1,26 @@
+defaults:
+  - net: unet
+  - optimizer: adam
+  - scheduler: none
+  - loss: ce
+  - /corrector: none
+
+_target_: rl4seg3d.supervised.supervised_3d_optimizer.Supervised3DOptimizer
+
+
+ckpt_path: null
+
+predict_save_dir: null
+
+# stuff from patchless-nnUnet
+
+optimizer_monitor: val/mean_dice
+
+tta: True
+save_predictions: False
+
+name: supervised_3d_RLmodule
+
+common_spacing: [0.37, 0.37, 1]
+
+sliding_window_len: 4

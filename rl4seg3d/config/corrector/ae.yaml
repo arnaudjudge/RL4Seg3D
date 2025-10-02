@@ -1,0 +1,3 @@
+_target_: rl4seg3d.utils.correctors.AEMorphoCorrector
+
+ae_ckpt_path: "AE_MODEL_NAME"

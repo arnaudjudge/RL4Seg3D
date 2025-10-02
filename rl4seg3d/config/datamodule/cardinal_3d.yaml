@@ -1,0 +1,18 @@
+_target_: rl4seg3d.datamodules.RL_3d_datamodule.RL3dDataModule
+data_dir: ${oc.env:DATA_PATH}/cardinal_RL_norm/
+num_workers: 12
+pin_memory: True
+batch_size: 1 # must be 1
+dataset_name: ""
+csv_file: cardinal.csv
+splits_column: lm_split2 # column for train-test-val split, will be created if doesn't yet exist
+seed: ${seed}
+
+max_image_area: null
+common_spacing: [0.37, 0.37, 1] # approx average spacing in dataset
+max_window_len: 4
+max_batch_size: 1
+max_tensor_volume: 5000000 # alright for 24gb gpu (NOT IN RL USE CASE)
+shape_divisible_by: [32, 32, 4]
+
+approx_gt_dir: ${logger.save_dir}

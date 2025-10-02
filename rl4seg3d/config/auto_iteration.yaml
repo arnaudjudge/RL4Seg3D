@@ -1,0 +1,45 @@
+defaults:
+  - _self_
+
+continue_from_ckpt: False
+
+num_iter: 4
+run_name: 3d_test
+output_path: ${oc.env:LOG_PATH}/${run_name}/
+
+pretrain_path: /data/rl_logs/run_1/0/actor.ckpt
+var_file: ${output_path}/variables.pkl
+
+target: icardio_3d
+source: camus
+
+#
+# supervised params
+#
+sup_num_epochs: 50
+
+# Increases randomness in initial model
+sup_loss_label_smoothing: 0.0
+
+#
+# RL params
+#
+rl_num_epochs: 5
+rl_num_predict: 2500
+rl_overrides: []
+rl_reward_config_name: rewardunets_3d # temporal_rewardunets_3d
+
+#
+# RewardNet params
+#
+rn_num_epochs: 50
+
+run_launcher: cedar
+
+#
+# Time
+#
+sup_time: 60
+test_pred_time: 60
+reward_time: 60
+rl_time: 60

@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - override /model: ppo_3d
+  - override /datamodule: cardinal_3d
+  - override /actor/actor@model.actor.actor: categorical_3d_unet_actor
+  - override /reward@model.reward: pixelwise_accuracy
+  - override /corrector@model.corrector: none
+
+datamodule:
+  supervised: True
+
+run_name: cardinal3d

@@ -1,0 +1,4 @@
+_target_: lightning.pytorch.loggers.TensorBoardLogger
+
+save_dir: ${work_dir}/test_logs
+name: ${logger_run_name}

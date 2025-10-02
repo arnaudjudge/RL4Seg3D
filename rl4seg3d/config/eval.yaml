@@ -1,9 +1,11 @@
 work_dir: ${hydra:runtime.cwd}
 run_name: default
 
+logger_run_name: 'EVAL_${get_class_name: ${model._target_}}_${run_name}'
+
 defaults:
   - logger: comet
-  - model: ppo
+  - model: ppo_3d
   - datamodule: ???
   - callbacks: default
   - experiment: ppo_icardio_3d
@@ -12,7 +14,7 @@ defaults:
 
 seed: 1
 
-ckpt_path: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/rl4seg3d_LM+ANAT_best.ckpt
+ckpt_path: rl4seg3d_slim.ckpt
 
 trainer:
   _target_: lightning.pytorch.Trainer

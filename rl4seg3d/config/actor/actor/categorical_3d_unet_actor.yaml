@@ -1,0 +1,7 @@
+defaults:
+  - net: unet3d.yaml
+
+_target_: rl4seg3d.actors.Actors_3d.Unet3DActorCategorical
+
+pretrain_ckpt: null
+ref_ckpt: null

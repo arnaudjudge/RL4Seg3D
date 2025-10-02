@@ -1,0 +1,4 @@
+_target_: rl4seg3d.rewardnet.reward_unet_3d_datamodule.RewardNet3DDataModule
+
+data_path: /data/rl_logs/3d_loop/
+test_fra: 0.1

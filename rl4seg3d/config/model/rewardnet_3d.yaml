@@ -1,0 +1,10 @@
+defaults:
+  - net: unet
+
+_target_: rl4seg3d.rewardnet.reward_unet_3d.Reward3DOptimizer
+
+save_model_path: ./reward_net_3d.ckpt
+
+net:
+  in_channels: 2
+  num_classes: 1

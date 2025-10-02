@@ -1,0 +1,14 @@
+defaults:
+  - /model/net@net: unet
+
+_target_: rl4seg3d.reward.reward_nets_3d.RewardUnets3D
+
+state_dict_paths:
+  anatomical: rewardnet_5000best.ckpt
+  landmarks: reward_net_3d_landmarkbigelipse.ckpt
+
+temp_factor: 1
+
+net:
+  in_channels: 2
+  num_classes: 1

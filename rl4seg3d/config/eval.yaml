@@ -1,0 +1,24 @@
+work_dir: ${hydra:runtime.cwd}
+run_name: default
+
+logger_run_name: 'EVAL_${get_class_name: ${model._target_}}_${run_name}'
+
+defaults:
+  - logger: comet
+  - model: ppo_3d
+  - datamodule: ???
+  - callbacks: default
+  - experiment: ppo_icardio_3d
+  - _self_
+
+
+seed: 1
+
+ckpt_path: rl4seg3d_slim.ckpt
+
+trainer:
+  _target_: lightning.pytorch.Trainer
+  log_every_n_steps: 1
+  accelerator: gpu
+  devices: 1
+#  num_sanity_val_steps: 0 # skip sanity check (convenient for debugging directly in train step)

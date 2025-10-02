@@ -1,0 +1,32 @@
+work_dir: ${hydra:runtime.cwd}
+run_name: default
+
+logger_run_name: '${get_class_name: ${model._target_}}_${get_class_name: ${model.reward._target_}}_${run_name}'
+
+defaults:
+  - logger: comet
+  - model: ppo_3d
+  - datamodule: ???
+  - callbacks: default
+  - _self_
+  - experiment: ppo_icardio_3d
+
+seed: 1
+
+datamodule:
+#  subset_frac: 1.0
+  gt_column: Gt_0
+
+predict_subset_frac: 0
+train: True
+test_from_ckpt: null
+
+save_csv_after_predict: null
+
+trainer:
+  _target_: lightning.pytorch.Trainer
+  max_epochs: 10
+  log_every_n_steps: 1
+  accelerator: gpu
+  devices: 1
+#  num_sanity_val_steps: 0 # skip sanity check (convenient for debugging directly in train step)

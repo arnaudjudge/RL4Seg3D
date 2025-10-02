@@ -1,0 +1,6 @@
+[submodule "vital"]
+	path = vital
+	url = git@github.com:arnaudjudge/vital.git
+[submodule "patchless-nnUnet"]
+	path = patchless-nnUnet
+	url = git@github.com:arnaudjudge/patchless-nnUnet.git

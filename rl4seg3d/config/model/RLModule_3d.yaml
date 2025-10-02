@@ -1,0 +1,8 @@
+defaults:
+  - /reward: rewardunets_3d
+  - /corrector: none
+
+actor_save_path: null
+critic_save_path: null
+
+predict_save_dir: ${oc.env:LOG_PATH}/rewardDS/

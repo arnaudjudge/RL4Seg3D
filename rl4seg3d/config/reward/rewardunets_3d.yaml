@@ -1,0 +1,14 @@
+defaults:
+  - /model/net@net: unet
+
+_target_: rl4seg3d.reward.reward_nets_3d.RewardUnets3D
+
+state_dict_paths:
+  anatomical: null #<PATH_TO_ANATOMICAL>
+  landmarks: null #<PATH_TO_LM>
+
+temp_factor: 1 #4.5989 optimal factor for LM+ANAT calibration
+
+net:
+  in_channels: 2
+  num_classes: 1

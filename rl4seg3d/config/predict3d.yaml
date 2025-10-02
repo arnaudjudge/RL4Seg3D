@@ -1,0 +1,67 @@
+# @package _global_
+
+defaults:
+  - model: ppo_3d
+  - paths: default
+  - extras: default
+  - hydra: patchless_nnunet
+  - _self_
+
+task_name: "predict"
+
+tags: ["predict"]
+
+# input folder containing data for inference
+input_folder: <INPUT>
+
+# output folder to save predictions
+output_folder: <OUT>
+
+# passing checkpoint path is necessary for prediction
+ckpt_path: <CKPT_FILE>
+
+# whether to use test time augmentation
+tta: True
+
+# whether to use test time optimization scheme: 'force' (always), 'on' (anatomical or temporal metrics fail) or 'off'
+# any other value will be considered 'off'
+tto: 'on'
+
+# whether to overwrite existing predictions in the output folder
+overwrite_existing: True
+
+common_spacing: [0.37, 0.37, 1]
+
+apply_eq_hist: True
+
+pin_memory: True
+
+num_workers: 12
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${output_folder}
+
+paths:
+  output_dir: ${output_folder}
+
+model:
+  tta: ${tta}
+  tto: ${tto}
+  # best parameters for TTO
+  actor:
+    actor_lr: 0.01
+  divergence_coeff: 0.01
+  entropy_coeff: 0.1
+  inference: True
+
+trainer:
+  _target_: lightning.pytorch.Trainer
+  inference_mode: False # MUST for TTO
+  max_epochs: 1
+  log_every_n_steps: 1
+  accelerator: gpu
+  devices: 1
+  default_root_dir: ${output_folder}
+

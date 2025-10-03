@@ -26,7 +26,7 @@ class TemporalRewardUnets3D(Reward):
             if path and Path(path).exists():
                 n.load_state_dict(torch.load(path))
             else:
-                print(f"BEWARE! You don't have a valid path for this reward net: {name}"
+                print(f"BEWARE! You don't have a valid path for this reward net: {name}\n"
                       "Ignore if using full checkpoint file")
             n.eval()
             self.nets.update({name: n})

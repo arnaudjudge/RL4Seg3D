@@ -5,6 +5,9 @@ import torch
 from lightning import LightningModule
 from omegaconf import OmegaConf
 import torch.nn.functional as F
+from torch.nn.functional import softmax
+from torchvision.transforms.functional import adjust_contrast, rotate
+from torch.nn.functional import pad
 
 OmegaConf.register_new_resolver(
     "get_class_name", lambda name: name.split('.')[-1]
@@ -111,10 +114,55 @@ class RLModule3DInferenceWrapper(torch.nn.Module):
         H, W, T = x.shape[-3:]
         return x[..., pad_H0:H - pad_H1, pad_W0:W - pad_W1, :]
 
-    def forward(self, x):
+    def x_translate_left(self, img, amount:int = 20):
+        return pad(img, (0, 0, 0, 0, amount, 0), mode="constant")[:, :, :-amount, :, :]
+
+    def x_translate_right(self, img, amount:int = 20):
+        return pad(img, (0, 0, 0, 0, 0, amount), mode="constant")[:, :, amount:, :, :]
+
+    def y_translate_up(self, img, amount:int = 20):
+        return pad(img, (0, 0, amount, 0, 0, 0), mode="constant")[:, :, :, :-amount, :]
+
+    def y_translate_down(self, img, amount:int = 20):
+        return pad(img, (0, 0, 0, amount, 0, 0), mode="constant")[:, :, :, amount:, :]
+
+    def tta_predict(self, x):
+        preds = softmax(self.temporal_sliding_window(x, net_id=0), dim=1)
+        factors = [1.1, 0.9, 1.25, 0.75]
+        translations = [40, 60, 80, 120]
+        rotations = [5, 10, -5, -10]
+
+        for factor in factors:
+            preds += softmax(self.temporal_sliding_window(adjust_contrast(
+                x.permute((4, 0, 1, 2, 3)), factor).permute((1, 2, 3, 4, 0)), net_id=0), dim=1)
+
+        for translation in translations:
+            preds += self.x_translate_right(softmax(self.temporal_sliding_window(self.x_translate_left(x, translation), net_id=0), dim=1),
+                                            translation)
+            preds += self.x_translate_left(softmax(self.temporal_sliding_window(self.x_translate_right(x, translation), net_id=0), dim=1),
+                                           translation)
+            preds += self.y_translate_down(softmax(self.temporal_sliding_window(self.y_translate_up(x, translation), net_id=0), dim=1),
+                                           translation)
+            preds += self.y_translate_up(softmax(self.temporal_sliding_window(self.y_translate_down(x, translation), net_id=0), dim=1),
+                                         translation)
+
+        # TODO: optimize this for compute time
+        for rotation in rotations:
+            rotated = torch.zeros_like(x)
+            for i in range(x.shape[-1]):
+                rotated[0, :, :, :, i] = rotate(x[0, :, :, :, i], angle=float(rotation))
+            rot_pred = softmax(self.temporal_sliding_window(rotated, net_id=0), dim=1)
+            for i in range(x.shape[-1]):
+                rot_pred[0, :, :, :, i] = rotate(rot_pred[0, :, :, :, i], angle=-float(rotation))
+            preds += rot_pred
+
+        preds /= len(factors) + len(translations) * 4 + len(rotations) + 1
+        return preds.argmax(dim=1)
+
+    def forward(self, x, tta:bool = True):
         x, pad = self.adjust_to_multiple(x)
         with torch.no_grad():
-            y = self.temporal_sliding_window(x, 0).argmax(dim=1)
+            y = self.tta_predict(x) if tta else self.temporal_sliding_window(x, 0).argmax(dim=1)
             r0 = torch.sigmoid(self.temporal_sliding_window(torch.stack((x.squeeze(1), y), dim=1), 1))
             r1 = torch.sigmoid(self.temporal_sliding_window(torch.stack((x.squeeze(1), y), dim=1), 2))
         y = self.undo_adjust(y, pad)
@@ -135,7 +183,7 @@ if __name__ == "__main__":
     sub_cfg = compose(config_name=f"model/ppo_3d.yaml")
     model: LightningModule = hydra.utils.instantiate(sub_cfg.model)
     model.load_state_dict(
-        torch.load('../rl4seg3d_ANAT+LM_policy_rewards_state_dict_only.ckpt'),
+        torch.load('../data/checkpoints/rl4seg3d_ANAT+LM_policy_rewards_state_dict_only.ckpt'),
         strict=False
     )
 
@@ -146,8 +194,9 @@ if __name__ == "__main__":
 
     script = torch.jit.script(wrapper)
     script = torch.jit.optimize_for_inference(script)
-    torch.jit.save(script, "../rl4seg3d_torchscript.pt")
+    torch.jit.save(script, "../data/checkpoints/rl4seg3d_torchscript_TTA.pt")
 
-    print(script(example_input)[0].shape)
+    print(script(example_input)[0].shape) # With TTA
 
+    print(script(example_input, tta=False)[0].shape) # Without TTA
 

@@ -25,6 +25,19 @@ Preprint available at: https://www.arxiv.org/abs/2406.17902
 
 Rl4Seg3D...coming soon
 
+## Inference
+### Easiest: Torch Script
+The simplest way to use the RL4Seg3D model for inference on any nifti file containing echocardiography image sequences (A2C or A4C views)
+is to use the TorchScript compiled model. For this, you will need a basic python environment with numpy, nibabel, torch and other basic packages.
+The `torchscript_predict_3d.py` script enables simple prediction using the following command:
+```bash
+   python torchscript_predict_3d.py --input <INPUT_PATH_TO_NIFTI_FILE_OR_FOLDER> --output <OUTPUT_PATH>
+```
+You can toggle off test-time adaptation (TTA) with the `--no_tta` flag for faster inference with slightly lower quality.
+
+** Make sure to have run `git lfs pull` to get the checkpoint downloaded. 
+
+
 ## Install
 
 1. Download the repository:

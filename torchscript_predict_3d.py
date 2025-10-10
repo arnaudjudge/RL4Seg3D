@@ -69,7 +69,6 @@ def process_single_file(input_path, output_dir, model, tta=True):
         print(f"Warning: {input_path} — Temporal dimension might not be last.")
 
     img_tensor = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).cuda()  # (1, 1, H, W, T)
-    print(tta)
     with torch.no_grad():
         out = model(img_tensor, tta)
 
@@ -101,7 +100,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run lightweight TorchScript RL4Seg model on a NIfTI image or folder")
     parser.add_argument("--input", "-i", required=True, help="Path to input NIfTI image or folder")
     parser.add_argument("--output", "-o", required=True, help="Path to save output NIfTI files")
-    parser.add_argument("--ckpt", "-c", required=True, help="Path to TorchScript checkpoint")
+    parser.add_argument("--ckpt", "-c", default='./data/checkpoints/rl4seg3d_torchscript_TTA.pt',
+                        help="Path to TorchScript checkpoint. Default is ./data/checkpoints/rl4seg3d_torchscript_TTA.pt")
     parser.add_argument("--no_tta", "-t", action="store_false",
                         help="Turn off TTA (faster inference, but reduced segmentation quality)")
     args = parser.parse_args()
@@ -123,7 +123,8 @@ def main():
             except Exception as e:
                 print(f"Failed on {file}: {e}")
     else:
-        process_single_file(args.input, args.output, model)
+        print(f"Processing WITH{'OUT' if not args.no_tta else ''} Test-time augmentation (TTA)")
+        process_single_file(args.input, args.output, model, args.no_tta)
 
     print(f"\nOutputs saved to {args.output}")
 

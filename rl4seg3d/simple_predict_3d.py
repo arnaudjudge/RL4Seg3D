@@ -5,6 +5,8 @@ import numpy as np
 import nibabel as nib
 import argparse
 
+from tqdm import tqdm
+
 
 def adjust_image(img_nii):
     """
@@ -58,43 +60,72 @@ def restore_image(processed_img, original_shape, original_spacing):
 
     return processed_img
 
-
-def main():
-    parser = argparse.ArgumentParser(description="Run lightweight TorchScript RL4Seg model on a NIfTI image")
-    parser.add_argument("--input", "-i", required=True, help="Path to input NIfTI image")
-    parser.add_argument("--output", "-o", required=True, help="Path to save output NIfTI")
-    parser.add_argument("--ckpt", "-c", required=True, help="Path to TorchScript checkpoint")
-    args = parser.parse_args()
-
-    # Load input image
-    img_nii = nib.load(args.input)
+def process_single_file(input_path, output_dir, model, tta=True):
+    img_nii = nib.load(input_path)
     img, original_spacing, original_shape = adjust_image(img_nii)
 
     H, W, T = img.shape
     if T > min(H, W):
-        print("Warning: Temporal dimension might not be last. Image may be transposed incorrectly.")
+        print(f"Warning: {input_path} — Temporal dimension might not be last.")
+
     img_tensor = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).cuda()  # (1, 1, H, W, T)
-
-    # Load TorchScript module onto cuda
-    scripted_module = torch.jit.load(args.ckpt, map_location='cuda')
-
-    # Get predictions
+    print(tta)
     with torch.no_grad():
-        out = scripted_module(img_tensor)
+        out = model(img_tensor, tta)
 
-    Path(args.output).mkdir(exist_ok=True, parents=True)
-    in_name = Path(args.input).name
-    # Convert to numpy and save to nifti
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+    in_name = Path(input_path).stem.replace('.nii', '')  # handle .nii and .nii.gz
+
+    # Save outputs
     segmentation = restore_image(out[0].cpu().numpy(), original_shape, original_spacing)
-    nib.save(nib.Nifti1Image(segmentation, affine=img_nii.affine, dtype='uint8'), f"{args.output}/{in_name.replace('.nii.gz', '_segmentation.nii.gz')}")
-    rew_fusion = restore_image(out[1].cpu().numpy(), original_shape, original_spacing)
-    nib.save(nib.Nifti1Image(rew_fusion, affine=img_nii.affine), f"{args.output}/{in_name.replace('.nii.gz', '_reward_fusion.nii.gz')}")
-    rew_anat = restore_image(out[2][0].cpu().numpy(), original_shape, original_spacing)
-    nib.save(nib.Nifti1Image(rew_anat, affine=img_nii.affine), f"{args.output}/{in_name.replace('.nii.gz', '_reward_anat.nii.gz')}")
-    rew_lm = restore_image(out[2][0].cpu().numpy(), original_shape, original_spacing)
-    nib.save(nib.Nifti1Image(rew_lm, affine=img_nii.affine), f"{args.output}/{in_name.replace('.nii.gz', 'reward_LM.nii.gz')}")
+    nib.save(nib.Nifti1Image(segmentation.astype(np.uint8), affine=img_nii.affine),
+             output_dir / f"{in_name}_segmentation.nii.gz")
 
-    print(f"Saved output to {args.output}")
+    rew_fusion = restore_image(out[1].cpu().numpy(), original_shape, original_spacing)
+    nib.save(nib.Nifti1Image(rew_fusion, affine=img_nii.affine),
+             output_dir / f"{in_name}_reward_fusion.nii.gz")
+
+    rew_anat = restore_image(out[2][0].cpu().numpy(), original_shape, original_spacing)
+    nib.save(nib.Nifti1Image(rew_anat, affine=img_nii.affine),
+             output_dir / f"{in_name}_reward_anat.nii.gz")
+
+    rew_lm = restore_image(out[2][0].cpu().numpy(), original_shape, original_spacing)
+    nib.save(nib.Nifti1Image(rew_lm, affine=img_nii.affine),
+             output_dir / f"{in_name}_reward_LM.nii.gz")
+
+    print(f"Done processing: {input_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run lightweight TorchScript RL4Seg model on a NIfTI image or folder")
+    parser.add_argument("--input", "-i", required=True, help="Path to input NIfTI image or folder")
+    parser.add_argument("--output", "-o", required=True, help="Path to save output NIfTI files")
+    parser.add_argument("--ckpt", "-c", required=True, help="Path to TorchScript checkpoint")
+    parser.add_argument("--no_tta", "-t", action="store_false",
+                        help="Turn off TTA (faster inference, but reduced segmentation quality)")
+    args = parser.parse_args()
+
+    model = torch.jit.load(args.ckpt, map_location='cuda')
+    model.eval()
+
+    input_path = Path(args.input)
+    if input_path.is_dir():
+        nii_files = sorted(list(input_path.rglob("*.nii")) + list(input_path.rglob("*.nii.gz")))
+        if not nii_files:
+            print(f"No NIfTI files found recursively in {input_path}")
+            return
+        print(f"Found {len(nii_files)} NIfTI files in {input_path}"
+              f"\nProcessing WITH{'OUT' if not args.no_tta else ''} Test-time augmentation (TTA)")
+        for file in tqdm(nii_files, desc="Processing files", ncols=80):
+            try:
+                process_single_file(file, args.output, model, args.no_tta) # beware of negation logic for no_tta arg
+            except Exception as e:
+                print(f"Failed on {file}: {e}")
+    else:
+        process_single_file(args.input, args.output, model)
+
+    print(f"\nOutputs saved to {args.output}")
 
 if __name__ == "__main__":
     main()

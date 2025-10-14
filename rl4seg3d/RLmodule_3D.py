@@ -498,7 +498,8 @@ class RLmodule3D(LightningModule):
         )
 
     def save_mask(
-        self, preds: np.ndarray, fname: str, spacing: np.ndarray, save_dir: Union[str, Path]
+        self, preds: np.ndarray, fname: str, spacing: np.ndarray, save_dir: Union[str, Path],
+            type: type[np.generic] | type[float] = np.uint8,
     ) -> None:
         """Save segmentation mask to the given save directory.
 
@@ -512,7 +513,7 @@ class RLmodule3D(LightningModule):
 
         os.makedirs(save_dir, exist_ok=True)
 
-        preds = preds.astype(np.uint8)
+        preds = preds.astype(type)
         itk_image = sitk.GetImageFromArray(rearrange(preds, "w h d ->  d h w"))
         itk_image.SetSpacing(spacing)
         sitk.WriteImage(itk_image, os.path.join(save_dir, str(fname) + ".nii.gz"))
@@ -546,15 +547,9 @@ class RLmodule3D(LightningModule):
         actions, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=True)
         actions_unsampled, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=False)
 
-        if self.pred_corrector:
-            corrected, corrected_validity, ae_comp, actions_unsampled_clean = self.pred_corrector.correct_single_seq(b_img.squeeze(0), actions_unsampled.squeeze(0), voxel_spacing)
-            corrected = corrected[None,]
-            actions_unsampled_clean = actions_unsampled_clean[None,]
-        else:
-            # set dummy values
-            actions_unsampled_clean = actions_unsampled
-            corrected_validity = False
-            ae_comp = 1.0
+        corrected, corrected_validity, ae_comp, actions_unsampled_clean = self.pred_corrector.correct_single_seq(b_img.squeeze(0), actions_unsampled.squeeze(0), voxel_spacing)
+        actions_unsampled_clean = actions_unsampled_clean[None,]
+        corrected = corrected[None,]
 
         initial_params = copy.deepcopy(self.actor.actor.net.state_dict())
         itr = 0
@@ -679,6 +674,8 @@ class RLmodule3D(LightningModule):
                 cache_roi_weight_map=True,
             )
 
+            self.reward_func.prepare_for_full_sequence()
+
             print(f"\n\nPredict step parameters: \n"
                   f"    - Sliding window len: {4}\n"
                   f"    - Sliding window overlap: {0.5}\n"
@@ -728,18 +725,8 @@ class RLmodule3D(LightningModule):
                 preds = self.tta_predict(img) if self.hparams.tta else self.predict(img).argmax(dim=1)
                 print(f"\nPost-TTO Prediction took {round(time.time() - start_time, 4)} (s).")
 
-        preds = preds.squeeze(0).cpu().detach().numpy()
-
-        original_shape = properties_dict.get("original_shape").cpu().detach().numpy()[0]
-        fname = properties_dict.get("case_identifier")[0]
-        spacing = properties_dict.get("original_spacing").cpu().detach().numpy()[0]
-        resampled_affine = properties_dict.get("resampled_affine").cpu().detach().numpy()[0]
-        affine = properties_dict.get('original_affine').cpu().detach().numpy()[0]
-
-        print(preds.shape)
-        final_preds = np.expand_dims(preds, 0)
-        print(final_preds.shape)
-        y_pred_np_as_batch = final_preds[0].transpose((2, 0, 1))
+        # remove extra blobs if any
+        y_pred_np_as_batch = preds[0].cpu().numpy().transpose((2, 0, 1))
         for i in range(len(y_pred_np_as_batch)):
             lbl, num = ndimage.measurements.label(y_pred_np_as_batch[i] != 0)
             # Count the number of elements per label
@@ -748,15 +735,36 @@ class RLmodule3D(LightningModule):
             maxi = np.argmax(count[1:]) + 1
             # Remove the other blobs
             y_pred_np_as_batch[i][lbl != maxi] = 0
+        preds = torch.tensor(y_pred_np_as_batch.transpose((1, 2, 0))[None,], device=self.device)
+
+        # get reward maps
+        rew = self.reward_func.predict_full_sequence(preds, img, None)
+        merged = torch.minimum(rew[0], rew[1]) if len(rew) > 1 else rew[0]
+
+        preds = preds.cpu().detach().numpy()
+        merged = merged.cpu().detach().numpy()
+        rew = [r.cpu().detach().numpy() for r in rew]
+
+        # save stuff
+        original_shape = properties_dict.get("original_shape").cpu().detach().numpy()[0]
+        fname = properties_dict.get("case_identifier")[0]
+        spacing = properties_dict.get("original_spacing").cpu().detach().numpy()[0]
+        resampled_affine = properties_dict.get("resampled_affine").cpu().detach().numpy()[0]
+        affine = properties_dict.get('original_affine').cpu().detach().numpy()[0]
 
         transform = tio.Resample(spacing)
         croporpad = tio.CropOrPad(original_shape)
-        final_preds = croporpad(transform(tio.LabelMap(tensor=final_preds, affine=resampled_affine))).numpy()[0]
 
-        save_dir = os.path.join(self.trainer.default_root_dir, "inference_raw")
+        inference_save_dir = properties_dict.get("inference_save_dir", None)
+        save_dir = inference_save_dir[0] if inference_save_dir else os.path.join(self.trainer.default_root_dir, "inference_raw")
 
-        self.save_mask(final_preds, fname, spacing, save_dir)
-        return final_preds
+        self.save_mask(croporpad(transform(tio.LabelMap(tensor=preds, affine=resampled_affine))).numpy()[0],
+                       fname, spacing, save_dir)
+        self.save_mask(croporpad(transform(tio.ScalarImage(tensor=merged, affine=resampled_affine))).numpy()[0],
+                       fname + "_merged_reward", spacing, save_dir, type=float)
+        [self.save_mask(croporpad(transform(tio.ScalarImage(tensor=rew[i], affine=resampled_affine))).numpy()[0],
+                       fname + f"_{i}_reward", spacing, save_dir, type=float) for i in range(len(rew))]
+        return preds, merged, rew
 
     def on_predict_epoch_end(self) -> None:
         if not self.hparams.inference:

@@ -7,6 +7,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torchio as tio
+from dotenv import load_dotenv
 from lightning import LightningModule
 from lightning import Trainer
 from monai import transforms
@@ -14,9 +15,9 @@ from monai.data import DataLoader, ArrayDataset, MetaTensor
 from monai.transforms import MapTransform
 from monai.transforms import ToTensord
 from omegaconf import DictConfig
-import skimage.exposure as exp
 
 from patchless_nnunet import utils, setup_root
+from rl4seg3d.utils.preprocessing import apply_eq_adapthist, rescale
 
 log = utils.get_pylogger(__name__)
 
@@ -28,7 +29,7 @@ class PatchlessPreprocess(MapTransform):
     """
 
     def __init__(
-        self, keys, common_spacing,
+            self, keys, common_spacing, inference_dir,
     ) -> None:
         """Initialize class instance.
 
@@ -39,6 +40,7 @@ class PatchlessPreprocess(MapTransform):
         super().__init__(keys)
         self.keys = keys
         self.common_spacing = np.array(common_spacing)
+        self.inference_dir = inference_dir
 
     def __call__(self, data: dict[str, str]):
         # load data
@@ -47,7 +49,8 @@ class PatchlessPreprocess(MapTransform):
 
         image_meta_dict = {"case_identifier": os.path.basename(image._meta["filename_or_obj"]),
                            "original_shape": np.array(image.shape[1:]),
-                           "original_spacing": np.array(image._meta["pixdim"][1:4].tolist())}
+                           "original_spacing": np.array(image._meta["pixdim"][1:4].tolist()),
+                           "inference_save_dir": self.inference_dir}
         original_affine = np.array(image._meta["original_affine"].tolist())
         image_meta_dict["original_affine"] = original_affine
 
@@ -100,25 +103,33 @@ class RL4Seg3DPredictor:
         # find all nifti files in input_path
         # open and get relevant information
         # add to list of data
-        for nifti_file_p in Path(input_path).rglob('*.nii.gz'):
+        input_path = Path(input_path)
+
+        # Handle single NIfTI file
+        if input_path.is_file() and input_path.suffix.startswith('.nii'):
+            nifti_files = [input_path]
+        # Handle folder of NIfTI files
+        elif input_path.is_dir():
+            nifti_files = list(input_path.rglob('*.nii*'))
+        else:
+            raise ValueError(f"Invalid input path: {input_path}")
+
+        for nifti_file_p in nifti_files:
             nifti_img = nib.load(nifti_file_p)
+            data = nifti_img.get_fdata()[None,]  # add batch/channel dim
 
-            data = np.expand_dims(nifti_img.get_fdata(), 0)
-
+            data = rescale(data)
             if apply_eq_hist:
-                print("Applying equalize_adapthist")
-                # arbitrary 200 for int-equivalent images, improve this
-                data = data / 255 if data.max() > 200 else np.clip(data, 0, 1)
-                for i in range(data.shape[-1]):
-                    data[0, ..., i] = exp.equalize_adapthist(data[0, ..., i], clip_limit=0.01)
+                data = apply_eq_adapthist(data)
 
             hdr = nifti_img.header
             aff = nifti_img.affine
-
-            meta = {"filename_or_obj": nifti_file_p.stem.split('.')[0].strip("_0000"),
-                    "pixdim": hdr['pixdim'],
-                    "original_affine": aff}
-            tensor_list += [{'image': MetaTensor(torch.tensor(data, dtype=torch.float32), meta=meta)}]
+            meta = {
+                "filename_or_obj": nifti_file_p.stem.split('.')[0].strip("_0000"),
+                "pixdim": hdr['pixdim'],
+                "original_affine": aff
+            }
+            tensor_list.append({'image': MetaTensor(torch.tensor(data, dtype=torch.float32), meta=meta)})
         return tensor_list
 
     @staticmethod
@@ -141,10 +152,6 @@ class RL4Seg3DPredictor:
         Raises:
             ValueError: If the checkpoint path is not provided.
         """
-        # apply extra utilities
-        # (e.g. ask for tags if none are provided in cfg, print cfg tree, etc.)
-        utils.extras(cfg)
-
         if not cfg.ckpt_path:
             raise ValueError("ckpt_path must not be empty!")
 
@@ -160,7 +167,7 @@ class RL4Seg3DPredictor:
             "trainer": trainer,
         }
 
-        preprocessed = PatchlessPreprocess(keys='image', common_spacing=cfg.common_spacing)
+        preprocessed = PatchlessPreprocess(keys='image', common_spacing=cfg.common_spacing, inference_dir=cfg.output_folder)
         tf = transforms.compose.Compose([preprocessed, ToTensord(keys="image", track_meta=True)])
 
         numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_folder, cfg.apply_eq_hist)
@@ -189,6 +196,8 @@ class RL4Seg3DPredictor:
 
 def main():
     """Run the script."""
+    load_dotenv()
+
     RL4Seg3DPredictor.main()
 
 

@@ -37,6 +37,32 @@ You can toggle off test-time adaptation (TTA) with the `--no_tta` flag for faste
 
 ** Make sure to have run `git lfs pull` to get the checkpoint downloaded. 
 
+### Complete: Docker container
+We also provide a Docker image to run the full inference script, including test-time optimization. 
+Images for this project are available here: https://hub.docker.com/r/arnaudjudge/rl4seg3d.
+
+IMPORTANT In order to use a Docker container with the host machine's GPU to run this tool, you must install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+The `--gpus all` flag allows for use of the host GPU.
+
+Use the following command:
+```bash
+  sudo docker run -it --ipc host --gpus all -v $(pwd)/:/MOUNT/ --user $(id -u):$(id -g) arnaudjudge/rl4seg3d:latest predict_3d input=/MOUNT/<PATH_TO_INPUT_FILE> output=/MOUNT/<PATH_TO_OUTPUT>
+```
+
+The command syntax is as follows:
+- `--ipc host` gives the container more shared memory.
+- `--gpus all` allocates access to all gpus on host machine. `--gpus "device=0"` can be used to allocate a specific gpu only.
+- `-v $(pwd)/:/MOUNT/` mounts the current directory to the /MOUNT/ directory in the container, allowing for file syncing between host and container.
+- `--user $(id -u):$(id -g)` allows to user in the container to be the same as outside it. Output files will not be locked by sudo user once created.
+- `input_folder=/MOUNT/<PATH_TO_INPUT>` input file. <u>The input file (or folder) must be within the current mounted directory.</u>*
+- `output_folder=/MOUNT/<PATH_TO_OUTPUT>` indicated the output file location. <u>The output folder location must be within the current mounted directory.</u>*
+
+\* Input and output paths must be located in current directory in order for files to be visible to the container and to be synced. This is true for any pah referenced in command line arguments.
+
+Debugging in the container can be done with the following command, opening a bash command line in the container:
+```bash
+  sudo docker run -it --ipc host --gpus all -v $(pwd)/:/MOUNT/ --user $(id -u):$(id -g) arnaudjudge/rl4seg3d:latest bash
+```
 
 ## Install
 

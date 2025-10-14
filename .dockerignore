@@ -1,0 +1,43 @@
+# Python specific ignores
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.env
+.venv/
+
+# Editor/IDE specific ignores
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Version control ignores
+.git/
+.gitignore
+
+# Build artifacts and logs
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+htmlcov/
+.coverage.*
+*.log
+tmp/
+
+# Sensitive files (if applicable)
+.env.local
+config.local.py
+secrets.json
+
+# torchscript checkpoints (my usage is pt rather than ckpt for these)
+**/*.pt
+
+# specific folders
+data/other_ckpt
+data/example
+data/icardio

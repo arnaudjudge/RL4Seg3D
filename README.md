@@ -44,7 +44,12 @@ Images for this project are available here: https://hub.docker.com/r/arnaudjudge
 IMPORTANT In order to use a Docker container with the host machine's GPU to run this tool, you must install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 The `--gpus all` flag allows for use of the host GPU.
 
-Use the following command:
+Use the following script (additional flags such as `tta=False tto=off` can also be added, same as if it was run with installed package):
+```bash   
+    sudo bash docker_predict_3d.sh input_path=<PATH_TO_INPUT_FILE_OR_FOLDER> output_path=<PATH_TO_OUTPUT_FOLDER>
+```
+
+It launches the following command for the docker container, appending /MOUNT/ to path variables for ease of use:
 ```bash
   sudo docker run -it --ipc host --gpus all -v $(pwd)/:/MOUNT/ --user $(id -u):$(id -g) arnaudjudge/rl4seg3d:latest predict_3d input=/MOUNT/<PATH_TO_INPUT_FILE> output=/MOUNT/<PATH_TO_OUTPUT>
 ```
@@ -100,12 +105,12 @@ Debugging in the container can be done with the following command, opening a bas
    To obtain predictions from an input folder and a pre-trained checkpoint, use the following command:
    By default, it will use TTA and automatic TTO, see config file for all options
    ```bash
-   predict_3d input_folder=<PATH/TO/DATA/> output_folder=<OUT/> ckpt_path=<checkpoint_file>
+   predict_3d input_path=<PATH/TO/DATA/> output_path=<OUT/> ckpt_path=<checkpoint_file>
    ```
 
    Alternatively, for fastest results, no test-time augmentation nor optimization
    ```bash
-   predict_3d input_folder=<PATH/TO/DATA/> output_folder=<OUT/> ckpt_path=<checkpoint_file> tta=False tto=off
+   predict_3d input_path=<PATH/TO/DATA/> output_path=<OUT/> ckpt_path=<checkpoint_file> tta=False tto=off
    ```
 
 To run training, use the runner.py script for individual runs, 

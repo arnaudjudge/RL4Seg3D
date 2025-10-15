@@ -106,7 +106,7 @@ class RL4Seg3DPredictor:
         input_path = Path(input_path)
 
         # Handle single NIfTI file
-        if input_path.is_file() and input_path.suffix.startswith('.nii'):
+        if input_path.is_file() and (input_path.suffix == ".nii" or "".join(input_path.suffixes[-2:]) == ".nii.gz"):
             nifti_files = [input_path]
         # Handle folder of NIfTI files
         elif input_path.is_dir():
@@ -167,10 +167,10 @@ class RL4Seg3DPredictor:
             "trainer": trainer,
         }
 
-        preprocessed = PatchlessPreprocess(keys='image', common_spacing=cfg.common_spacing, inference_dir=cfg.output_folder)
+        preprocessed = PatchlessPreprocess(keys='image', common_spacing=cfg.common_spacing, inference_dir=cfg.output_path)
         tf = transforms.compose.Compose([preprocessed, ToTensord(keys="image", track_meta=True)])
 
-        numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_folder, cfg.apply_eq_hist)
+        numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist)
         dataset = ArrayDataset(img=numpy_arr_data, img_transform=tf)
 
         dataloader = DataLoader(

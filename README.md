@@ -35,6 +35,9 @@ The `torchscript_predict_3d.py` script enables simple prediction using the follo
 ```
 You can toggle off test-time adaptation (TTA) with the `--no_tta` flag for faster inference with slightly lower quality.
 
+** Tip: Consider applying skimage.exposure.equalize_adapthist() to images before inference (it was applied to training data). 
+Full script (Docker included) applies it by default.
+
 ** Make sure to have run `git lfs pull` to get the checkpoint downloaded. 
 
 ### Complete: Docker container

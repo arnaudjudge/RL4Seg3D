@@ -17,13 +17,13 @@ The reward network can be used as a reliable uncertainty estimator once training
 While it has been tested and used on echocardiography images, it can be used with any other image modality.
 
 ## References
+Rl4Seg3D preprint available at: https://arxiv.org/abs/2510.14244
+
 Original RL4Seg: https://github.com/arnaudjudge/RL4Seg
 
 Arnaud Judge, Thierry Judge, Nicolas Duchateau, Roman A. Sandler, Joseph Z. Sokol, Olivier Bernard, Pierre-Marc Jodoin. Domain Adaptation of Echocardiography Segmentation Via Reinforcement Learning. International Conference on Medical Image Computing and Computer Assisted Intervention (MICCAI), 2024, Marrakesh, Morocco.
 
 Preprint available at: https://www.arxiv.org/abs/2406.17902
-
-Rl4Seg3D...coming soon
 
 ## Inference
 ### Easiest: Torch Script

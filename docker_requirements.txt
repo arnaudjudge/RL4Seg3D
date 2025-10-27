@@ -33,3 +33,4 @@ strenum==0.4.15
 keras_preprocessing==1.1.2
 comet_ml==3.53.0
 opencv-python==4.11.0.86
+pydicom==3.0.1

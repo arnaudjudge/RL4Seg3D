@@ -4,6 +4,7 @@ from typing import Tuple
 
 import hydra
 import nibabel as nib
+import pydicom
 import numpy as np
 import torch
 import torchio as tio
@@ -20,6 +21,39 @@ from patchless_nnunet import utils, setup_root
 from rl4seg3d.utils.preprocessing import apply_eq_adapthist, rescale
 
 log = utils.get_pylogger(__name__)
+
+
+def load_image(input_path):
+    if (input_path.suffix == ".nii" or "".join(input_path.suffixes[-2:]) == ".nii.gz"):
+        nifti_img = nib.load(input_path)
+        data = nifti_img.get_fdata()
+        aff = nifti_img.affine
+        spacing = nifti_img.header['pixdim'][1:4].tolist()
+    elif input_path.suffix == ".dcm":
+        dcm = pydicom.dcmread(input_path)
+        arr = dcm.pixel_array
+        if len(arr.shape) > 3:
+            arr = arr.mean(-1)
+        data = arr
+
+        spacing = None
+        if 'PixelSpacing' in dcm:
+            spacing = [float(x) for x in dcm.PixelSpacing]
+        elif 'ImagerPixelSpacing' in dcm:
+            spacing = [float(x) for x in dcm.ImagerPixelSpacing]
+        elif 'SequenceOfUltrasoundRegions' in dcm:
+            seq = dcm.SequenceOfUltrasoundRegions[0]
+            if hasattr(seq, 'PhysicalDeltaX') and hasattr(seq, 'PhysicalDeltaY'):
+                spacing = [abs(float(seq.PhysicalDeltaX)) * 10, abs(float(seq.PhysicalDeltaY)) * 10, 1.0]
+        else:
+            spacing = [1.0, 1.0]  # default fallback if no calibration info
+
+        data = data.transpose((2, 1, 0))
+        aff = np.diag([spacing[1], spacing[0], 1, 0])
+    else:
+        raise Exception(f"Tried to load file with invalid type: {input_path}")
+
+    return data, aff, spacing
 
 
 class PatchlessPreprocess(MapTransform):
@@ -49,7 +83,7 @@ class PatchlessPreprocess(MapTransform):
 
         image_meta_dict = {"case_identifier": os.path.basename(image._meta["filename_or_obj"]),
                            "original_shape": np.array(image.shape[1:]),
-                           "original_spacing": np.array(image._meta["pixdim"][1:4].tolist()),
+                           "original_spacing": np.array(image._meta['spacing']),
                            "inference_save_dir": self.inference_dir}
         original_affine = np.array(image._meta["original_affine"].tolist())
         image_meta_dict["original_affine"] = original_affine
@@ -105,29 +139,30 @@ class RL4Seg3DPredictor:
         # add to list of data
         input_path = Path(input_path)
 
-        # Handle single NIfTI file
-        if input_path.is_file() and (input_path.suffix == ".nii" or "".join(input_path.suffixes[-2:]) == ".nii.gz"):
-            nifti_files = [input_path]
-        # Handle folder of NIfTI files
+        if (input_path.is_file() and
+                (input_path.suffix == ".dcm" or
+                 input_path.suffix == ".nii" or
+                 "".join(input_path.suffixes[-2:]) == ".nii.gz")):
+            input_files = [input_path]
         elif input_path.is_dir():
-            nifti_files = list(input_path.rglob('*.nii*'))
+            input_files = (list(input_path.rglob('*.dcm')) +
+                           list(input_path.rglob("*.nii")) +
+                           list(input_path.rglob("*.nii.gz")))
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 
-        for nifti_file_p in nifti_files:
-            nifti_img = nib.load(nifti_file_p)
-            data = nifti_img.get_fdata()[None,]  # add batch/channel dim
+        for input_file_p in input_files:
+            data, aff, spacing = load_image(input_file_p)
 
+            data = data[None,]  # add batch/channel dim
             data = rescale(data)
             if apply_eq_hist:
                 data = apply_eq_adapthist(data)
 
-            hdr = nifti_img.header
-            aff = nifti_img.affine
             meta = {
-                "filename_or_obj": nifti_file_p.stem.split('.')[0].strip("_0000"),
-                "pixdim": hdr['pixdim'],
-                "original_affine": aff
+                "filename_or_obj": input_file_p.stem.split('.')[0].removesuffix("_0000"),
+                "spacing": spacing,
+                "original_affine": aff,
             }
             tensor_list.append({'image': MetaTensor(torch.tensor(data, dtype=torch.float32), meta=meta)})
         return tensor_list

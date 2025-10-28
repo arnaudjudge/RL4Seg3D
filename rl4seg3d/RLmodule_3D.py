@@ -30,6 +30,7 @@ from rl4seg3d.utils.tensor_utils import convert_to_numpy
 from rl4seg3d.utils.test_metrics import full_test_metrics
 from rl4seg3d.utils.Metrics import is_anatomically_valid
 from rl4seg3d.utils.temporal_metrics import check_temporal_validity
+from rl4seg3d.utils.viz_utils import save_to_gif
 from vital.metrics.camus.anatomical.utils import check_segmentation_validity
 
 
@@ -764,6 +765,14 @@ class RLmodule3D(LightningModule):
                        fname + "_merged_reward", spacing, save_dir, type=float)
         [self.save_mask(croporpad(transform(tio.ScalarImage(tensor=rew[i], affine=resampled_affine))).numpy()[0],
                        fname + f"_{i}_reward", spacing, save_dir, type=float) for i in range(len(rew))]
+
+        save_gif = properties_dict.get("save_to_gif", None)
+        if save_gif:
+            gif_path = os.path.join(save_dir, str(fname) + ".gif")
+            print(f"Saving gif to {gif_path}")
+            img_b = img.cpu().numpy().squeeze(0).squeeze(0).transpose((2, 0, 1))
+            save_to_gif(img_b, gif_path, y_pred_np_as_batch)
+
         return preds, merged, rew
 
     def on_predict_epoch_end(self) -> None:

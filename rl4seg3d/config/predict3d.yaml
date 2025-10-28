@@ -30,6 +30,8 @@ tto: 'on'
 # whether to overwrite existing predictions in the output folder
 overwrite_existing: True
 
+save_as_gif: True
+
 common_spacing: [0.37, 0.37, 1]
 
 apply_eq_hist: True

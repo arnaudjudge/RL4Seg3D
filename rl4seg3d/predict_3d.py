@@ -63,7 +63,7 @@ class PatchlessPreprocess(MapTransform):
     """
 
     def __init__(
-            self, keys, common_spacing, inference_dir,
+            self, keys, common_spacing, inference_dir, save_to_gif
     ) -> None:
         """Initialize class instance.
 
@@ -75,16 +75,20 @@ class PatchlessPreprocess(MapTransform):
         self.keys = keys
         self.common_spacing = np.array(common_spacing)
         self.inference_dir = inference_dir
+        self.save_to_gif = save_to_gif
 
     def __call__(self, data: dict[str, str]):
         # load data
         d = dict(data)
         image = d["image"]
 
-        image_meta_dict = {"case_identifier": os.path.basename(image._meta["filename_or_obj"]),
-                           "original_shape": np.array(image.shape[1:]),
-                           "original_spacing": np.array(image._meta['spacing']),
-                           "inference_save_dir": self.inference_dir}
+        image_meta_dict = {
+            "case_identifier": os.path.basename(image._meta["filename_or_obj"]),
+            "original_shape": np.array(image.shape[1:]),
+            "original_spacing": np.array(image._meta['spacing']),
+            "inference_save_dir": self.inference_dir,
+            "save_to_gif": self.save_to_gif,
+        }
         original_affine = np.array(image._meta["original_affine"].tolist())
         image_meta_dict["original_affine"] = original_affine
 
@@ -202,7 +206,10 @@ class RL4Seg3DPredictor:
             "trainer": trainer,
         }
 
-        preprocessed = PatchlessPreprocess(keys='image', common_spacing=cfg.common_spacing, inference_dir=cfg.output_path)
+        preprocessed = PatchlessPreprocess(keys='image',
+                                           common_spacing=cfg.common_spacing,
+                                           inference_dir=cfg.output_path,
+                                           save_to_gif=cfg.save_as_gif)
         tf = transforms.compose.Compose([preprocessed, ToTensord(keys="image", track_meta=True)])
 
         numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist)

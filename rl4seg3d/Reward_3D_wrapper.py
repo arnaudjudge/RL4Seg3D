@@ -1,4 +1,4 @@
-from typing import Tuple, List
+from typing import Tuple, List, Union
 
 import hydra
 import torch
@@ -20,6 +20,7 @@ class RLReward3DInferenceWrapper(torch.nn.Module):
         super().__init__()
         self.reward_net0 = reward_nets[0] # ANAT
         self.reward_net1 = reward_nets[1] # LM
+        self.target_spacing = torch.tensor([0.37, 0.37], dtype=torch.float32)
 
     # must be implemented with net_id to accommodate torchscript, could this be improved?
     def temporal_sliding_window(
@@ -109,15 +110,94 @@ class RLReward3DInferenceWrapper(torch.nn.Module):
         H, W, T = x.shape[-3:]
         return x[..., pad_H0:H - pad_H1, pad_W0:W - pad_W1, :]
 
-    def forward(self, x, y):
-        x, pad = self.adjust_to_multiple(x)
-        y, pad = self.adjust_to_multiple(y)
+    def resample_hw_only(self, x: torch.Tensor, current_spacing: torch.Tensor):
+        """
+        Resample spatial dims H x W to target spacing 0.37 x 0.37.
+        x: (H, W, T) or (1, H, W, T)
+        Returns:
+            x_resampled: same rank tensor
+            orig_hw: tensor([H, W])
+        """
+        is_int = x.dtype in (torch.int8, torch.uint8, torch.int16,
+                             torch.int32, torch.int64)
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+
+        # ensure batch dim
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # (1, H, W, T)
+
+        _, H, W, T = x.shape
+        sh, sw = current_spacing[0], current_spacing[1]
+        th, tw = 0.37, 0.37  # fixed target spacing
+
+        new_H = int((H * sh / th + 0.5))
+        new_W = int((W * sw / tw + 0.5))
+
+        # reshape to (1*T, 1, H, W) for interpolate
+        x2 = x.permute(0, 3, 1, 2).reshape(T, 1, H, W)
+        x2 = F.interpolate(x2, size=(new_H, new_W), mode="bilinear" if not is_int else "nearest",
+                           align_corners=False if not is_int else None)
+        # reshape back to (1, new_H, new_W, T)
+        x2 = x2.reshape(1, T, new_H, new_W).permute(0, 2, 3, 1)
+
+        if is_int:
+            x = x.to(orig_dtype)
+
+        orig_hw = torch.tensor([H, W], dtype=torch.int32, device=x.device)
+        return x2, orig_hw
+
+    def resample_hw_back(self, x: torch.Tensor, orig_hw: torch.Tensor):
+        """
+        x: (1, H2, W2, T)
+        orig_hw: tensor([H, W])
+        """
+        is_int = x.dtype in (torch.int8, torch.uint8, torch.int16,
+                             torch.int32, torch.int64)
+        orig_dtype = x.dtype
+        # Always cast to float for interpolation
+        x = x.to(torch.float32)
+
+        _, H2, W2, T = x.shape
+        H, W = int(orig_hw[0].item()), int(orig_hw[1].item())
+
+        x2 = x.permute(0, 3, 1, 2).reshape(T, 1, H2, W2)
+        x2 = F.interpolate(x2, size=(H, W), mode="bilinear" if not is_int else "nearest",
+                           align_corners=False if not is_int else None)
+        x2 = x2.reshape(1, T, H, W).permute(0, 2, 3, 1)
+
+        if is_int:
+            x = x.to(orig_dtype)
+        return x2
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor, current_spacing: List[float]|torch.Tensor):
+        # ensure spacing tensor
+        if not isinstance(current_spacing, torch.Tensor):
+            current_spacing = torch.tensor(current_spacing, dtype=x.dtype, device=x.device)
+
+        # --- 1. Resample spatial dims to target spacing 0.37 ---
+        x_rs, orig_hw = self.resample_hw_only(x, current_spacing)
+        y_rs, _       = self.resample_hw_only(y, current_spacing)
+        # --- 2. Pad/crop to multiples (if needed) ---
+        x_adj, pad = self.adjust_to_multiple(x_rs)
+        y_adj, _   = self.adjust_to_multiple(y_rs)
+        # --- 3. Run temporal sliding window ---
         with torch.no_grad():
-            r0 = torch.sigmoid(self.temporal_sliding_window(torch.stack((x, y), dim=1), 0))
-            r1 = torch.sigmoid(self.temporal_sliding_window(torch.stack((x, y), dim=1), 1))
-        r0 = self.undo_adjust(r0, pad).squeeze(0)
-        r1 = self.undo_adjust(r1, pad).squeeze(0)
-        return r0, r1, torch.minimum(r0, r1).squeeze(0)
+            xy = torch.stack((x_adj, y_adj), dim=1)
+            r0 = torch.sigmoid(self.temporal_sliding_window(xy, 0)).squeeze(0)
+            r1 = torch.sigmoid(self.temporal_sliding_window(xy, 1)).squeeze(0)
+
+        # --- 4. Undo padding ---
+        r0 = self.undo_adjust(r0, pad)
+        r1 = self.undo_adjust(r1, pad)
+
+        # --- 5. Resample back to original spatial dims ---
+        r0 = self.resample_hw_back(r0, orig_hw).squeeze(0)
+        r1 = self.resample_hw_back(r1, orig_hw).squeeze(0)
+
+        # --- 6. Return ---
+        return r0, r1, torch.minimum(r0, r1)
+
 
 
 if __name__ == "__main__":
@@ -138,14 +218,14 @@ if __name__ == "__main__":
 
     wrapper = RLReward3DInferenceWrapper(model.reward_func.get_nets()).cuda()
     example_img = torch.rand((1, 487, 480, 15), device='cuda') # B, C, H, W, T
-    example_seg = torch.rand((1, 487, 480, 15), device='cuda')  # B, C, H, W, T
-
-    print(wrapper(example_img, example_seg)[0].shape)
+    example_seg = torch.randint(high=2, low=0, size=(1, 487, 480, 15), device='cuda')  # B, C, H, W, T
+    spacing = torch.tensor([0.4, 0.4])
+    print(wrapper(example_img, example_seg, spacing)[0].shape)
 
     script = torch.jit.script(wrapper)
     script = torch.jit.optimize_for_inference(script)
-    torch.jit.save(script, "../data/checkpoints/rl4seg3d_REWARD_torchscript.pt")
+    torch.jit.save(script, "../data/checkpoints/rl4seg3d_REWARD_torchscript_w_resampling.pt")
 
-    print(script(example_img, example_seg)[0].shape)
+    print(script(example_img, example_seg, spacing)[0].shape)
 
 

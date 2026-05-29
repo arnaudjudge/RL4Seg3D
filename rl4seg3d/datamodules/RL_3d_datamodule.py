@@ -67,11 +67,15 @@ class RL3dDataset(Dataset):
     def __getitem__(self, idx):
         # Get paths and open images
         sub_path = get_img_subpath(self.df.iloc[idx])
-        img_nifti = nib.load(self.data_path + '/img/' + sub_path)
+        img_full = self.data_path + '/img/' + sub_path
+        if not os.path.exists(img_full):
+            # TODO: legacy datasets used a _0000 suffix; drop once migrated
+            img_full = img_full.replace('.nii.gz', '_0000.nii.gz')
+        img_nifti = nib.load(img_full)
         img = img_nifti.get_fdata()
         if int(img.max()) > 1:
             img = img / 255
-        mask = nib.load(self.data_path + '/segmentation/' + sub_path.replace("_0000", "")).get_fdata()
+        mask = nib.load(self.data_path + '/segmentation/' + sub_path).get_fdata()
         original_shape = np.asarray(list(img.shape))
 
         # integrate this into dataset
@@ -156,7 +160,7 @@ class RL3dDataset(Dataset):
                                     'resampled_affine': resampled_affine,
                                     'view': self.df.iloc[idx]['view'],
                                     },
-                'view_as_id': torch.tensor(VIEW_MAP[self.df.iloc[idx]['view']], dtype=torch.long),
+                'view_as_id': torch.tensor(VIEW_MAP[self.df.iloc[idx]['view'].lower()], dtype=torch.long),
                 }
 
     def get_desired_size(self, current_shape):

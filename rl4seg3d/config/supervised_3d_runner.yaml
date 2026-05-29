@@ -16,7 +16,7 @@ model:
 
 callbacks:
   model_checkpoint:
-    monitor: val_dice
+    monitor: val/dice
 
 predict_subset_frac: 0
 

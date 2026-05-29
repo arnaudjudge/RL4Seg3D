@@ -79,7 +79,7 @@ def hausdorff(pred: np.ndarray, target: np.ndarray, labels: Tuple[LabelEnum], ex
     return hd_dict
 
 
-def full_test_metrics(y_pred_as_batch, gt_as_batch, voxel_spacing, device, prefix='test', verbose=True):
+def full_test_metrics(y_pred_as_batch, gt_as_batch, voxel_spacing, device, prefix='test', view=None, verbose=True):
     start_time = time.time()
     test_dice = dice(y_pred_as_batch, gt_as_batch, labels=(Label.BG, Label.LV, Label.MYO),
                      exclude_bg=True, all_classes=True)
@@ -98,7 +98,7 @@ def full_test_metrics(y_pred_as_batch, gt_as_batch, voxel_spacing, device, prefi
         print(f"HD took {round(time.time() - start_time, 4)} (s).")
 
     start_time = time.time()
-    anat_errors = is_anatomically_valid(y_pred_as_batch)
+    anat_errors = is_anatomically_valid(y_pred_as_batch, voxel_spacing)
     if verbose:
         print(f"AV took {round(time.time() - start_time, 4)} (s).")
 
@@ -115,7 +115,7 @@ def full_test_metrics(y_pred_as_batch, gt_as_batch, voxel_spacing, device, prefi
 
     logs = {
         f"{prefix}/anat_valid": torch.tensor(int(all(anat_errors)), device=device),
-        f"{prefix}/anat_valid_frames": torch.tensor(anat_errors, device=device).mean(),
+        f"{prefix}/anat_valid_frames": torch.tensor(anat_errors, device=device, dtype=float).mean(),
         f"{prefix}/temporal_valid": torch.tensor(temporal_valid, device=device),
         f"{prefix}/temporal_errors": torch.tensor(num_temporal_errors, device=device),
         f"{prefix}/dice/epi": torch.tensor(test_dice_epi, device=device),
@@ -124,6 +124,9 @@ def full_test_metrics(y_pred_as_batch, gt_as_batch, voxel_spacing, device, prefi
     logs.update({f"{prefix}/{k}": v for k, v in test_dice.items()})
     logs.update({f"{prefix}/{k}": v for k, v in test_hd.items()})
     logs.update({f"{prefix}/LM/{k}": v for k, v in lm_metrics.items()})
+
+    if view:
+        logs.update({f"{k.replace(prefix, f'{prefix}/{view}')}": v for k, v in logs.copy().items()})
 
     return logs
 

@@ -12,6 +12,7 @@ from monai.data import DataLoader
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 
+VIEW_MAP = {"a2c": 0, "a3c": 1, "a4c": 2}
 
 def get_img_subpath(row):
     """
@@ -19,7 +20,7 @@ def get_img_subpath(row):
     :param row: dataframe row with all columns filled in
     :return: string containing path to image file
     """
-    return f"{row['study']}/{str(row['view']).lower()}/{row['dicom_uuid']}_0000.nii.gz"
+    return f"{row['study']}/{str(row['view']).lower()}/{row['dicom_uuid']}.nii.gz"
 
 
 class RL3dDataset(Dataset):
@@ -116,6 +117,7 @@ class RL3dDataset(Dataset):
                     max_time_len = img.shape[-1]
                 else:
                     max_time_len = int(self.max_tensor_volume // (img.shape[1] * img.shape[2]))
+                    max_time_len = (max_time_len // self.shape_divisible_by[-1]) * self.shape_divisible_by[-1]
                 dynamic_batch_size = max(1, max_time_len // self.max_window_len) \
                     if not self.max_batch_size or not (self.max_batch_size > 0 and
                                                        (self.max_batch_size * self.max_window_len) < max_time_len) \
@@ -130,9 +132,9 @@ class RL3dDataset(Dataset):
                         b_approx_gt += [approx_gt[..., (i*self.max_window_len):(i*self.max_window_len+self.max_window_len)]]
                     else:
                         start_idx = np.random.randint(low=0, high=max(img.shape[-1] - self.max_window_len, 1))
-                        b_img += [img[..., start_idx:start_idx + self.max_window_len]]
-                        b_mask += [mask[..., start_idx:start_idx + self.max_window_len]]
-                        b_approx_gt += [approx_gt[..., start_idx:start_idx + self.max_window_len]]
+                        b_img += [img[..., start_idx:start_idx + min(self.max_window_len, max_time_len)]]
+                        b_mask += [mask[..., start_idx:start_idx + min(self.max_window_len, max_time_len)]]
+                        b_approx_gt += [approx_gt[..., start_idx:start_idx + min(self.max_window_len, max_time_len)]]
                 img = torch.stack(b_img)
                 mask = torch.stack(b_mask)
                 approx_gt = torch.stack(b_approx_gt)
@@ -152,7 +154,9 @@ class RL3dDataset(Dataset):
                                     'original_spacing': img_nifti.header['pixdim'][1:4],
                                     'original_affine': img_nifti.affine,
                                     'resampled_affine': resampled_affine,
-                                    }
+                                    'view': self.df.iloc[idx]['view'],
+                                    },
+                'view_as_id': torch.tensor(VIEW_MAP[self.df.iloc[idx]['view']], dtype=torch.long),
                 }
 
     def get_desired_size(self, current_shape):
@@ -216,7 +220,7 @@ class RL3dDataModule(LightningDataModule):
 
         self.data_path = self.hparams.data_dir + '/' + self.hparams.dataset_name
         # open dataframe for dataset
-        self.df = pd.read_csv(self.data_path + '/' + self.hparams.csv_file, index_col=0)
+        self.df = pd.read_csv(self.data_path + '/' + self.hparams.csv_file, index_col=0, dtype={"study": str})
 
         self.data_train: Optional[torch.utils.Dataset] = None
         self.data_val: Optional[torch.utils.Dataset] = None

@@ -1,5 +1,7 @@
 import torch
 torch.set_float32_matmul_precision('medium')
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 import os
 from pathlib import Path
@@ -28,7 +30,7 @@ def main(cfg):
     os.environ["HYDRA_FULL_ERROR"] = "1"
     print(OmegaConf.to_yaml(cfg))
 
-    seed_everything(cfg.seed)
+    seed_everything(cfg.seed, workers=True)
 
     logger = instantiate(cfg.logger)
 

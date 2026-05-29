@@ -1,5 +1,5 @@
 defaults:
-  - net: unet
+  - net: conditioned_unet
   - optimizer: adam
   - scheduler: none
   - loss: ce
@@ -24,3 +24,6 @@ name: supervised_3d_RLmodule
 common_spacing: [0.37, 0.37, 1]
 
 sliding_window_len: 4
+
+# number of view classes for one-hot conditioning; must match net.cond_dim
+num_views: 3

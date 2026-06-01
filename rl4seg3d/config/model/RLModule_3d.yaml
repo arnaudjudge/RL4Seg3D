@@ -6,3 +6,6 @@ actor_save_path: null
 critic_save_path: null
 
 predict_save_dir: null
+
+# Number of distinct view labels in the dataset (a2c, a3c, a4c -> 3). 0 disables view conditioning.
+num_views: 3

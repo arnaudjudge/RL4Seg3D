@@ -26,7 +26,9 @@ class UnetActorBinary(nn.Module):
                 # will never be updated
                 self.old_net.requires_grad_(False)
 
-    def forward(self, x):
+    def forward(self, x, cond=None):
+        # cond is unused for the 2D Bernoulli actor (UNet has no cond_projectors),
+        # accepted only so the call signature matches the conditioned 3D actor.
         logits = torch.sigmoid(self.net(x)).squeeze(1)
         dist = Bernoulli(probs=logits)
 
@@ -54,7 +56,8 @@ class UnetActorCategorical(nn.Module):
                 # will never be updated
                 self.old_net.requires_grad_(False)
 
-    def forward(self, x):
+    def forward(self, x, cond=None):
+        # cond is unused for the 2D categorical actor (UNet has no cond_projectors).
         logits = torch.softmax(self.net(x), dim=1)
         dist = Categorical(probs=logits.permute(0, 2, 3, 1))
 
@@ -75,7 +78,8 @@ class UnetCritic(nn.Module):
         if pretrain_ckpt:
             self.net.load_state_dict(torch.load(pretrain_ckpt))
 
-    def forward(self, x):
+    def forward(self, x, cond=None):
+        # cond is unused for the 2D UnetCritic; accepted for signature parity.
         return torch.sigmoid(self.net(x))
 
 
@@ -106,17 +110,18 @@ class Actor(nn.Module):
             return torch.optim.Adam(self.actor.net.parameters(), lr=self.actor_lr), \
                    torch.optim.Adam(self.critic.net.parameters(), lr=self.critic_lr)
 
-    def act(self, imgs, sample=True):
+    def act(self, imgs, sample=True, cond=None):
         """
             Get actions from actor based on batch of images
         Args:
             imgs: batch of images
             sample: bool, use sample from distribution or deterministic method
+            cond: optional view conditioning tensor (B, cond_dim), ignored when actor net isn't conditioned
 
         Returns:
             Actions
         """
-        logits, distribution, _ = self.actor(imgs)
+        logits, distribution, _ = self.actor(imgs, cond)
 
         if sample:
             actions = distribution.sample()
@@ -135,19 +140,20 @@ class Actor(nn.Module):
 
         return actions
 
-    def evaluate(self, imgs, actions):
+    def evaluate(self, imgs, actions, cond=None):
         """
             Evaluate images with both actor and critic
             In this default case, the critic is null, therefore is not considered
         Args:
             imgs: (state) images to evaluate
             actions: segmentation taken over images
+            cond: optional view conditioning tensor (B, cond_dim)
 
         Returns:
             actions (sampled), logits from actor predictions, log_probs,
             entropy placeholder, placeholder value function estimate from critic
         """
-        logits, distribution, old_distribution = self.actor(imgs)
+        logits, distribution, old_distribution = self.actor(imgs, cond)
         log_probs = distribution.log_prob(actions)
 
         if old_distribution:

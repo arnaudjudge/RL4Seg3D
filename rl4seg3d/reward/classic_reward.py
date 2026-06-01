@@ -31,18 +31,25 @@ class RewardUnet(Reward):
 
 class RewardUnet3D(Reward):
     def __init__(self, net, state_dict_path, temp_factor=1):
+        from rl4seg3d.actors.Actors_3d import _zero_missing_cond_projectors
         self.net = net
-        self.net.load_state_dict(torch.load(state_dict_path))
+        missing, _ = self.net.load_state_dict(torch.load(state_dict_path), strict=False)
+        _zero_missing_cond_projectors(self.net, missing)
         self.net.eval()
         self.temp_factor = temp_factor
 
+    def _net_forward(self, stack, cond):
+        if cond is not None and hasattr(self.net, "cond_projectors"):
+            return self.net(stack, cond)
+        return self.net(stack)
+
     @torch.no_grad()
-    def __call__(self, pred, imgs, gt):
+    def __call__(self, pred, imgs, gt, cond=None):
         stack = torch.stack((imgs.squeeze(1), pred), dim=1)
         # return as list for code suiting multireward
 
         with torch.cuda.amp.autocast(enabled=False):  # force float32
-            out = self.net(stack)
+            out = self._net_forward(stack, cond)
         rew = torch.sigmoid(out / self.temp_factor).squeeze(1)
 
         # normalize
@@ -53,13 +60,13 @@ class RewardUnet3D(Reward):
         return [rew]
 
     @torch.no_grad()
-    def predict_full_sequence(self, pred, imgs, gt):
+    def predict_full_sequence(self, pred, imgs, gt, cond=None):
         stack = torch.stack((imgs.squeeze(1), pred), dim=1)
 
         self.patch_size = list([stack.shape[-3], stack.shape[-2], 4])
         self.inferer.roi_size = self.patch_size
         with torch.cuda.amp.autocast(enabled=False):  # force float32
-            return [torch.sigmoid(self.predict(stack, apply_softmax=False)).squeeze(1)]
+            return [torch.sigmoid(self.predict(stack, apply_softmax=False, cond=cond)).squeeze(1)]
 
     def prepare_for_full_sequence(self, batch_size=1) -> None:  # noqa: D102
         sw_batch_size = batch_size
@@ -73,13 +80,14 @@ class RewardUnet3D(Reward):
         )
 
     def predict(
-        self, image: Union[Tensor, MetaTensor], apply_softmax: bool = True
+        self, image: Union[Tensor, MetaTensor], apply_softmax: bool = True, cond=None,
     ) -> Union[Tensor, MetaTensor]:
         """Predict 2D/3D images with sliding window inference.
 
         Args:
             image: Image to predict.
             apply_softmax: Whether to apply softmax to prediction.
+            cond: optional view conditioning tensor.
 
         Returns:
             Aggregated prediction over all sliding windows.
@@ -93,7 +101,7 @@ class RewardUnet3D(Reward):
                 # Pad the last dimension to avoid 3D segmentation border artifacts
                 pad_len = 6 if image.shape[-1] > 6 else image.shape[-1] - 1
                 image = F.pad(image, (pad_len, pad_len, 0, 0, 0, 0), mode="reflect")
-                pred = self.predict_3D_3Dconv_tiled(image, apply_softmax)
+                pred = self.predict_3D_3Dconv_tiled(image, apply_softmax, cond=cond)
                 # Inverse the padding after prediction
                 return pred[..., pad_len:-pad_len]
             else:
@@ -102,7 +110,7 @@ class RewardUnet3D(Reward):
             raise ValueError("No 2D images here. You dummy.")
 
     def predict_3D_3Dconv_tiled(
-        self, image: Union[Tensor, MetaTensor], apply_softmax: bool = True
+        self, image: Union[Tensor, MetaTensor], apply_softmax: bool = True, cond=None,
     ) -> Union[Tensor, MetaTensor]:
         """Predict 3D image with 3D model.
 
@@ -120,25 +128,19 @@ class RewardUnet3D(Reward):
             raise ValueError("image must be (b, c, w, h, d)")
 
         if apply_softmax:
-            return softmax_helper(self.sliding_window_inference(image))
+            return softmax_helper(self.sliding_window_inference(image, cond=cond))
         else:
-            return self.sliding_window_inference(image)
+            return self.sliding_window_inference(image, cond=cond)
 
     def sliding_window_inference(
-        self, image: Union[Tensor, MetaTensor],
+        self, image: Union[Tensor, MetaTensor], cond=None,
     ) -> Union[Tensor, MetaTensor]:
-        """Inference using sliding window.
-
-        Args:
-            image: Image to predict.
-
-        Returns:
-            Predicted logits.
-        """
-        return self.inferer(
-            inputs=image,
-            network=self.net,
-        )
+        """Inference using sliding window. Broadcast cond to each patch batch when supported."""
+        if cond is not None and hasattr(self.net, "cond_projectors"):
+            def _net(x, _n=self.net, _c=cond):
+                return _n(x, _c.expand(x.shape[0], -1))
+            return self.inferer(inputs=image, network=_net)
+        return self.inferer(inputs=image, network=self.net)
 
 
 class AccuracyMap(Reward):

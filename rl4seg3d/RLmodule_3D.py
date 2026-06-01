@@ -11,6 +11,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 import torchio as tio
 from einops import rearrange
 from lightning import LightningModule
@@ -55,6 +56,7 @@ class RLmodule3D(LightningModule):
                  tto='off',
                  temp_files_path='.',
                  inference=False,
+                 num_views: int = 0,
                  *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
@@ -84,12 +86,26 @@ class RLmodule3D(LightningModule):
 
         # for test time overfitting
         self.initial_test_params = None
+        # cond cached for sliding-window inference closures (test/predict)
+        self._current_cond = None
 
     def configure_optimizers(self):
         return self.actor.get_optimizers()
 
+    def _get_cond(self, batch) -> Tensor | None:
+        """One-hot view conditioning tensor (B=1, num_views) from the batch, or None.
+
+        Each sample in the RL datamodule emits a single ``view_as_id`` scalar so the
+        returned tensor has batch dim 1; expand to the per-step batch at the call site.
+        """
+        if self.hparams.num_views <= 0 or batch is None or 'view_as_id' not in batch:
+            return None
+        view_id = batch['view_as_id'].long().view(-1)
+        return F.one_hot(view_id, num_classes=self.hparams.num_views).float().to(self.device)
+
     @torch.no_grad()  # no grad since tensors are reused in PPO's for loop
-    def rollout(self, imgs: torch.tensor, gt: torch.tensor, use_gt: torch.tensor = None, sample: bool = True):
+    def rollout(self, imgs: torch.tensor, gt: torch.tensor, use_gt: torch.tensor = None,
+                sample: bool = True, cond: Tensor = None):
         """
             Rollout the policy over a batch of images and ground truth pairs
         Args:
@@ -97,18 +113,28 @@ class RLmodule3D(LightningModule):
             gt: batch of ground truth segmentation maps
             use_gt: replace policy result with ground truth (bool mask of len of batch)
             sample: whether to sample actions from distribution or determinist
+            cond: optional view conditioning tensor (B, cond_dim)
 
         Returns:
             Actions (used for rewards, log_pobs, etc), sampled_actions (mainly for display), log_probs, rewards
         """
-        actions = self.actor.act(imgs, sample=sample)
-        rewards = self.reward_func(actions, imgs, gt)
+        actor_cond = self._expand_cond(cond, imgs.shape[0])
+        actions = self.actor.act(imgs, sample=sample, cond=actor_cond)
+        rewards = self.reward_func(actions, imgs, gt, cond=actor_cond)
 
         if use_gt is not None:
             actions[use_gt, ...] = gt[use_gt, ...]
 
-        _, _, log_probs, _, _, _ = self.actor.evaluate(imgs, actions)
+        _, _, log_probs, _, _, _ = self.actor.evaluate(imgs, actions, cond=actor_cond)
         return actions, log_probs, rewards
+
+    @staticmethod
+    def _expand_cond(cond: Tensor | None, batch_size: int) -> Tensor | None:
+        if cond is None:
+            return None
+        if cond.shape[0] == batch_size:
+            return cond
+        return cond.expand(batch_size, -1)
 
     def training_step(self, batch: dict[str, Tensor], nb_batch):
         """
@@ -160,6 +186,7 @@ class RLmodule3D(LightningModule):
             Dict of logs
         """
         b_imgs, b_gts, b_use_gts = batch['img'].squeeze(0), batch['gt'].squeeze(0), batch['use_gt'].squeeze(0)
+        base_cond = self._get_cond(batch)
 
         logs = {'val/loss': [],
                 "val/reward": [],
@@ -170,12 +197,14 @@ class RLmodule3D(LightningModule):
             b_img = b_imgs[i:i+self.hparams.val_batch_size]
             b_gt = b_gts[i:i+self.hparams.val_batch_size]
             b_use_gt = b_use_gts[i:i+self.hparams.val_batch_size]
+            step_cond = self._expand_cond(base_cond, b_img.shape[0])
 
-            prev_actions, prev_log_probs, prev_rewards = self.rollout(b_img, b_gt, sample=False)
+            prev_actions, prev_log_probs, prev_rewards = self.rollout(b_img, b_gt, sample=False, cond=step_cond)
             prev_rewards = torch.mean(torch.stack(prev_rewards, dim=0), dim=0)
 
             loss, critic_loss, metrics_dict = self.compute_policy_loss((b_img, prev_actions, prev_rewards,
-                                                                        prev_log_probs, b_gt, b_use_gt))
+                                                                        prev_log_probs, b_gt, b_use_gt),
+                                                                       cond=step_cond)
 
             acc = accuracy(prev_actions, b_img, b_gt)
             dice = dice_score(prev_actions, b_gt)
@@ -185,7 +214,7 @@ class RLmodule3D(LightningModule):
             logs["val/acc"] += [acc.mean()]
             logs["val/dice"] += [dice.mean()]
 
-            _, _, _, _, v, _ = self.actor.evaluate(b_img, prev_actions)
+            _, _, _, _, v, _ = self.actor.evaluate(b_img, prev_actions, cond=step_cond)
             # log images
             if self.trainer.global_rank == 0:
                 idx = random.randint(0, len(b_img) - 1)  # which image to log
@@ -217,6 +246,7 @@ class RLmodule3D(LightningModule):
             Dict of logs
         """
         b_img, b_gt, meta_dict = batch['img'], batch['gt'], batch['image_meta_dict']
+        self._current_cond = self._get_cond(batch)
 
         self.patch_size = list([b_img.shape[-3], b_img.shape[-2], 4])
         self.inferer.roi_size = self.patch_size
@@ -278,7 +308,8 @@ class RLmodule3D(LightningModule):
                                         repeats=len(y_pred_np_as_batch), axis=0)
             print(f"Cleaning took {round(time.time() - start_time, 4)} (s).")
 
-        prev_rewards = torch.stack(self.reward_func.predict_full_sequence(prev_actions, b_img, b_gt), dim=0)
+        prev_rewards = torch.stack(self.reward_func.predict_full_sequence(prev_actions, b_img, b_gt,
+                                                                          cond=self._current_cond), dim=0)
         prev_rewards_mean = torch.mean(prev_rewards, dim=0)
 
         logs = full_test_metrics(y_pred_np_as_batch, b_gt_np_as_batch, voxel_spacing, self.device)
@@ -314,7 +345,8 @@ class RLmodule3D(LightningModule):
         start_time = time.time()
         # for logging v
         # Use only first 4 for visualization, avoids having to implement sliding window inference for critic
-        _, _, _, _, v, _ = self.actor.evaluate(b_img[..., :4], prev_actions[..., :4])
+        _, _, _, _, v, _ = self.actor.evaluate(b_img[..., :4], prev_actions[..., :4],
+                                                cond=self._expand_cond(self._current_cond, b_img.shape[0]))
 
         if self.trainer.global_rank == 0 and batch_idx % 1 == 1232314:
             log_video(self.logger, img=b_gt, background=b_img.squeeze(0), title='test_GroundTruth', number=batch_idx,
@@ -381,6 +413,9 @@ class RLmodule3D(LightningModule):
         self, image: Union[Tensor, MetaTensor], apply_softmax: bool = True
     ) -> Union[Tensor, MetaTensor]:
         """Predict 2D/3D images with sliding window inference.
+
+        Uses ``self._current_cond`` (set by test/predict steps) for view conditioning
+        when the actor net supports it.
 
         Args:
             image: Image to predict.
@@ -485,18 +520,14 @@ class RLmodule3D(LightningModule):
     def sliding_window_inference(
         self, image: Union[Tensor, MetaTensor]
     ) -> Union[Tensor, MetaTensor]:
-        """Inference using sliding window.
-
-        Args:
-            image: Image to predict.
-
-        Returns:
-            Predicted logits.
-        """
-        return self.inferer(
-            inputs=image,
-            network=self.actor.actor.net,
-        )
+        """Inference using sliding window, broadcasting ``self._current_cond`` to each patch batch."""
+        cond = self._current_cond
+        net = self.actor.actor.net
+        if cond is not None and hasattr(net, "cond_projectors"):
+            def _net(x, _n=net, _c=cond):
+                return _n(x, _c.expand(x.shape[0], -1))
+            return self.inferer(inputs=image, network=_net)
+        return self.inferer(inputs=image, network=net)
 
     def save_mask(
         self, preds: np.ndarray, fname: str, spacing: np.ndarray, save_dir: Union[str, Path],
@@ -540,13 +571,16 @@ class RLmodule3D(LightningModule):
             return final_preds
         # must be batch size 1 as images have varied sizes
         b_img, meta_dict = batch['img'].squeeze(0), batch['image_meta_dict']
+        self._current_cond = self._get_cond(batch)
         id = meta_dict['case_identifier'][0]
         voxel_spacing = np.asarray([abs(meta_dict['resampled_affine'][0, 0, 0].cpu().numpy()),
                                      abs(meta_dict['resampled_affine'][0, 1, 1].cpu().numpy())])
 
         # could use full sequence later and split into subsecquions here
-        actions, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=True)
-        actions_unsampled, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=False)
+        actions, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=True,
+                                     cond=self._current_cond)
+        actions_unsampled, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=False,
+                                               cond=self._current_cond)
 
         corrected, corrected_validity, ae_comp, actions_unsampled_clean = self.pred_corrector.correct_single_seq(b_img.squeeze(0), actions_unsampled.squeeze(0), voxel_spacing)
         actions_unsampled_clean = actions_unsampled_clean[None,]
@@ -580,7 +614,8 @@ class RLmodule3D(LightningModule):
                             param.add_(torch.randn(param.size()).to(next(self.actor.actor.net.parameters()).device) * multiplier)
 
                     # make prediction
-                    deformed_action, *_ = self.actor.actor(b_img)
+                    deformed_action, *_ = self.actor.actor(b_img,
+                                                            self._expand_cond(self._current_cond, b_img.shape[0]))
                     if len(deformed_action.shape) > 4:
                         deformed_action = deformed_action.argmax(dim=1)
                     else:
@@ -603,7 +638,8 @@ class RLmodule3D(LightningModule):
                     in_img = adjust_contrast(in_img.permute((4, 0, 1, 2, 3)), factor).permute((1, 2, 3, 4, 0))
 
                     # make prediction
-                    contr_action, *_ = self.actor.actor(in_img)
+                    contr_action, *_ = self.actor.actor(in_img,
+                                                         self._expand_cond(self._current_cond, in_img.shape[0]))
                     if len(contr_action.shape) > 4:
                         contr_action = contr_action.argmax(dim=1)
                     else:
@@ -627,7 +663,8 @@ class RLmodule3D(LightningModule):
                     in_img /= in_img.max()
 
                     # make prediction
-                    blurred_action, *_ = self.actor.actor(in_img)
+                    blurred_action, *_ = self.actor.actor(in_img,
+                                                           self._expand_cond(self._current_cond, in_img.shape[0]))
                     if len(blurred_action.shape) > 4:
                         blurred_action = blurred_action.argmax(dim=1)
                     else:
@@ -685,6 +722,7 @@ class RLmodule3D(LightningModule):
 
     def inference_predict_step(self, batch: dict[str, Tensor], batch_idx: int):
         img, properties_dict = batch["image"], batch["image_meta_dict"]
+        self._current_cond = self._get_cond(batch)
 
         self.patch_size = list([img.shape[-3], img.shape[-2], 4])
         self.inferer.roi_size = self.patch_size
@@ -739,7 +777,7 @@ class RLmodule3D(LightningModule):
         preds = torch.tensor(y_pred_np_as_batch.transpose((1, 2, 0))[None,], device=self.device)
 
         # get reward maps
-        rew = self.reward_func.predict_full_sequence(preds, img, None)
+        rew = self.reward_func.predict_full_sequence(preds, img, None, cond=self._current_cond)
         merged = torch.minimum(rew[0], rew[1]) if len(rew) > 1 else rew[0]
 
         preds = preds.cpu().detach().numpy()

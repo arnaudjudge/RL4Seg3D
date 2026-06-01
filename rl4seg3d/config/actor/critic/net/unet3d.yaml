@@ -1,4 +1,7 @@
-_target_: patchless_nnunet.models.components.unet.UNet
+_target_: rl4seg3d.supervised.conditioned_unet.ConditionedUNet
+
+cond_dim: 3
+inject: all  # all | bottleneck | encoder | decoder
 
 in_channels: 1
 num_classes: 1

@@ -44,9 +44,10 @@ class PPO3D(RLmodule3D):
 
         # TODO: REMOVE GT
         b_img, b_gt, b_use_gt = batch['img'].squeeze(0), batch['gt'].squeeze(0), batch['use_gt'].squeeze(0)
+        cond = self._expand_cond(self._get_cond(batch), b_img.shape[0])
 
         # get actions, log_probs, rewards, etc from pi (stays constant for all steps k)
-        prev_actions, prev_log_probs, prev_rewards = self.rollout(b_img, b_gt, b_use_gt, sample=False)
+        prev_actions, prev_log_probs, prev_rewards = self.rollout(b_img, b_gt, b_use_gt, sample=False, cond=cond)
         num_rewards = len(prev_rewards)
 
         # iterate with pi prime k times
@@ -54,7 +55,8 @@ class PPO3D(RLmodule3D):
             # calculates training loss
             loss, critic_loss, metrics_dict = self.compute_policy_loss((b_img, prev_actions,
                                                                         prev_rewards[k % num_rewards],
-                                                                        prev_log_probs, b_gt, b_use_gt))
+                                                                        prev_log_probs, b_gt, b_use_gt),
+                                                                       cond=cond)
             self.manual_backward(loss)
             if "32" in self.trainer.precision:
                 nn.utils.clip_grad_norm_(self.actor.actor.parameters(), 0.5)
@@ -78,19 +80,21 @@ class PPO3D(RLmodule3D):
 
             self.log_dict(logs, prog_bar=True)
 
-    def compute_policy_loss(self, batch, **kwargs):
+    def compute_policy_loss(self, batch, cond=None, **kwargs):
         """
             Compute unsupervised loss to maximise reward using PPO method.
         Args:
             batch: batch of images, actions, log_probs, rewards and ground truth
+            cond: optional view conditioning tensor (B, cond_dim)
             sample: whether to sample from distribution or deterministic approach (mainly for val, test steps)
 
         Returns:
             mean loss(es) for the batch, metrics dictionary
         """
         b_img, b_actions, b_rewards, b_log_probs, b_gt, b_use_gt = batch
+        cond = self._expand_cond(cond, b_img.shape[0])
 
-        _, logits, log_probs, entropy, v, old_log_probs = self.actor.evaluate(b_img, b_actions)
+        _, logits, log_probs, entropy, v, old_log_probs = self.actor.evaluate(b_img, b_actions, cond=cond)
 
         v_deeps = None
         if isinstance(v, list):
@@ -155,6 +159,8 @@ class PPO3D(RLmodule3D):
         Returns:
             None, actor is modified, ready for inference on batch_image alone
         """
+        # cached by the calling test/predict step; broadcast inside the per-chunk loops below
+        tto_cond = self._current_cond
         self.train()
         augmentations = 3
         self.divergence_coeff = 0.01
@@ -189,7 +195,8 @@ class PPO3D(RLmodule3D):
                                 next(self.actor.actor.net.parameters()).device) * random.uniform(0.001, 0.01)
                             chunk_def /= chunk_def.max()
 
-                        prev_actions, prev_log_probs, prev_rewards = self.rollout(chunk_def, None, None)
+                        chunk_cond = self._expand_cond(tto_cond, chunk_def.shape[0])
+                        prev_actions, prev_log_probs, prev_rewards = self.rollout(chunk_def, None, None, cond=chunk_cond)
 
                         sum_chunk_reward += prev_rewards[0].mean()
                         lowest_frame_reward = min(prev_rewards[0].mean(axis=(0, 1, 2)).min().item(), lowest_frame_reward)
@@ -198,7 +205,8 @@ class PPO3D(RLmodule3D):
                         if i != 0:
                             loss, _, _ = self.compute_policy_loss((chunk, prev_actions,
                                                                              prev_rewards[0],
-                                                                             prev_log_probs, None, None))
+                                                                             prev_log_probs, None, None),
+                                                                  cond=chunk_cond)
                             loss = loss / augmentations
                             self.manual_backward(loss)
                     lowest_frame_reward = min(avg_lowest_reward_frame, lowest_frame_reward)

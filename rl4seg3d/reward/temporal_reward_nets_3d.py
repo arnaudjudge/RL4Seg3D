@@ -10,7 +10,9 @@ from monai.data import MetaTensor
 from torch import Tensor
 
 from patchless_nnunet.utils.inferers import SlidingWindowInferer
+from rl4seg3d.actors.Actors_3d import _zero_missing_cond_projectors
 from rl4seg3d.reward.generic_reward import Reward
+from rl4seg3d.reward.reward_nets_3d import _reward_net_forward
 from rl4seg3d.utils.temporal_metrics import get_temporal_consistencies
 
 """
@@ -24,7 +26,8 @@ class TemporalRewardUnets3D(Reward):
         for name, path in state_dict_paths.items():
             n = deepcopy(net)
             if path and Path(path).exists():
-                n.load_state_dict(torch.load(path))
+                missing, _ = n.load_state_dict(torch.load(path), strict=False)
+                _zero_missing_cond_projectors(n, missing)
             else:
                 print(f"BEWARE! You don't have a valid path for this reward net: {name}\n"
                       "Ignore if using full checkpoint file")
@@ -33,11 +36,11 @@ class TemporalRewardUnets3D(Reward):
         self.temp_factor = temp_factor
 
     @torch.no_grad()
-    def __call__(self, pred, imgs, gt):
+    def __call__(self, pred, imgs, gt, cond=None):
         stack = torch.stack((imgs.squeeze(1), pred), dim=1)
         r = []
         for net in self.get_nets():
-            rew = torch.sigmoid(net(stack) / self.temp_factor).squeeze(1)
+            rew = torch.sigmoid(_reward_net_forward(net, stack, cond) / self.temp_factor).squeeze(1)
             for i in range(rew.shape[0]):
                 for j in range(rew.shape[-1]):
                     rew[i, ..., j] = rew[i, ..., j] - rew[i, ..., j].min()
@@ -75,13 +78,13 @@ class TemporalRewardUnets3D(Reward):
         return list(self.nets.keys()).index(reward_name)
 
     @torch.no_grad()
-    def predict_full_sequence(self, pred, imgs, gt):
+    def predict_full_sequence(self, pred, imgs, gt, cond=None):
         stack = torch.stack((imgs.squeeze(1), pred), dim=1)
 
         self.patch_size = list([stack.shape[-3], stack.shape[-2], 4])
         self.inferer.roi_size = self.patch_size
 
-        return [torch.sigmoid(p).squeeze(1) for p in self.predict(stack)]
+        return [torch.sigmoid(p).squeeze(1) for p in self.predict(stack, cond=cond)]
 
     def prepare_for_full_sequence(self, batch_size=1) -> None:  # noqa: D102
         sw_batch_size = batch_size
@@ -95,7 +98,7 @@ class TemporalRewardUnets3D(Reward):
         )
 
     def predict(
-        self, image: Union[Tensor, MetaTensor],
+        self, image: Union[Tensor, MetaTensor], cond=None,
     ) -> List[Union[Tensor, MetaTensor]]:
         """Predict 2D/3D images with sliding window inference.
 
@@ -115,7 +118,7 @@ class TemporalRewardUnets3D(Reward):
                 # Pad the last dimension to avoid 3D segmentation border artifacts
                 pad_len = 6 if image.shape[-1] > 6 else image.shape[-1] - 1
                 image = F.pad(image, (pad_len, pad_len, 0, 0, 0, 0), mode="reflect")
-                pred = self.predict_3D_3Dconv_tiled(image)
+                pred = self.predict_3D_3Dconv_tiled(image, cond=cond)
                 # Inverse the padding after prediction
                 return [p[..., pad_len:-pad_len] for p in pred]
             else:
@@ -124,7 +127,7 @@ class TemporalRewardUnets3D(Reward):
             raise ValueError("No 2D images here. You dummy.")
 
     def predict_3D_3Dconv_tiled(
-        self, image: Union[Tensor, MetaTensor],
+        self, image: Union[Tensor, MetaTensor], cond=None,
     ) -> List[Union[Tensor, MetaTensor]]:
         """Predict 3D image with 3D model.
 
@@ -141,20 +144,18 @@ class TemporalRewardUnets3D(Reward):
         if not len(image.shape) == 5:
             raise ValueError("image must be (b, c, w, h, d)")
 
-        return self.sliding_window_inference(image)
+        return self.sliding_window_inference(image, cond=cond)
 
     def sliding_window_inference(
-        self, image: Union[Tensor, MetaTensor],
+        self, image: Union[Tensor, MetaTensor], cond=None,
     ) -> List[Union[Tensor, MetaTensor]]:
-        """Inference using sliding window.
-
-        Args:
-            image: Image to predict.
-
-        Returns:
-            Predicted logits.
-        """
-        return [self.inferer(
-            inputs=image,
-            network=n,
-        ) for n in self.get_nets()]
+        """Inference using sliding window, broadcasting cond to every patch batch."""
+        results = []
+        for n in self.get_nets():
+            if cond is not None and hasattr(n, "cond_projectors"):
+                def _net(x, _n=n, _c=cond):
+                    return _n(x, _c.expand(x.shape[0], -1))
+                results.append(self.inferer(inputs=image, network=_net))
+            else:
+                results.append(self.inferer(inputs=image, network=n))
+        return results

@@ -75,7 +75,10 @@ class RL3dDataset(Dataset):
         img = img_nifti.get_fdata()
         if int(img.max()) > 1:
             img = img / 255
-        mask = nib.load(self.data_path + '/segmentation/' + sub_path).get_fdata()
+        if self.allow_real_gt or self.test:
+            mask = nib.load(self.data_path + '/segmentation/' + sub_path).get_fdata()
+        else:
+            mask = np.zeros_like(img)
         original_shape = np.asarray(list(img.shape))
 
         # integrate this into dataset
@@ -224,7 +227,7 @@ class RL3dDataModule(LightningDataModule):
 
         self.data_path = self.hparams.data_dir + '/' + self.hparams.dataset_name
         # open dataframe for dataset
-        self.df = pd.read_csv(self.data_path + '/' + self.hparams.csv_file, index_col=0, dtype={"study": str})
+        self.df = pd.read_csv(self.data_path + '/' + self.hparams.csv_file, dtype={"study": str})
 
         self.data_train: Optional[torch.utils.Dataset] = None
         self.data_val: Optional[torch.utils.Dataset] = None
@@ -427,7 +430,11 @@ class RL3dDataModule(LightningDataModule):
 
         for i in idx:
             sub_path = get_img_subpath(self.df.iloc[i])
-            img_nifti = nib.load(self.data_path + '/img/' + sub_path)
+            img_full = self.data_path + '/img/' + sub_path
+            if not os.path.exists(img_full):
+                # TODO: legacy datasets used a _0000 suffix; drop once migrated
+                img_full = img_full.replace('.nii.gz', '_0000.nii.gz')
+            img_nifti = nib.load(img_full)
             spacings += img_nifti.header['pixdim'][1:4]
 
         return spacings / len(idx)

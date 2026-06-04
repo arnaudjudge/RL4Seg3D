@@ -16,10 +16,11 @@ import torch.distributions as distributions
 
 
 class Reward3DOptimizer(LightningModule):
-    def __init__(self, net, loss=nn.MSELoss(), save_model_path=None, var_file=None, **kwargs):
+    def __init__(self, net, loss=nn.MSELoss(), save_model_path=None, var_file=None, num_views=0, **kwargs):
         super().__init__(**kwargs)
 
         self.net = net
+        self.num_views = num_views
 
         self.temperature = nn.Parameter(torch.ones(1).to(self.device))
         self.var_file = var_file
@@ -27,8 +28,18 @@ class Reward3DOptimizer(LightningModule):
         self.loss = loss
         self.save_model_path = save_model_path
 
-    def forward(self, x):
-        out = self.net(x)
+    def _get_cond(self, batch):
+        """One-hot view conditioning tensor from batch's view_id, or None."""
+        if self.num_views <= 0 or len(batch) < 3:
+            return None
+        view_id = batch[2].long().view(-1)
+        return F.one_hot(view_id, num_classes=self.num_views).float().to(self.device)
+
+    def forward(self, x, cond=None):
+        if cond is not None and hasattr(self.net, 'cond_projectors'):
+            out = self.net(x, cond=cond)
+        else:
+            out = self.net(x)
         return out
 
     def configure_optimizers(self):
@@ -37,12 +48,13 @@ class Reward3DOptimizer(LightningModule):
         return {"optimizer": opt, "lr_scheduler": sch, "monitor": "val_loss"}
 
     def training_step(self, batch, *args, **kwargs) -> Dict:
-        x, y = batch
+        x, y = batch[0], batch[1]
+        cond = self._get_cond(batch)
         if len(x.shape) > 5:
             x = x.squeeze(0)
             y = y.squeeze(0)
 
-        y_pred = torch.sigmoid(self(x))
+        y_pred = torch.sigmoid(self(x, cond=cond))
         loss = self.loss(y_pred, y)
 
         logs = {
@@ -53,12 +65,13 @@ class Reward3DOptimizer(LightningModule):
         return logs
 
     def validation_step(self, batch, batch_idx: int):
-        x, y = batch
+        x, y = batch[0], batch[1]
+        cond = self._get_cond(batch)
         if len(x.shape) > 5:
             x = x.squeeze(0)
             y = y.squeeze(0)
 
-        y_pred = torch.sigmoid(self(x))
+        y_pred = torch.sigmoid(self(x, cond=cond))
         loss = self.loss(y_pred, y)
 
         acc = accuracy(y_pred, x, y)
@@ -77,12 +90,13 @@ class Reward3DOptimizer(LightningModule):
         return {'loss': loss}
 
     def test_step(self, batch, batch_idx):
-        x, y = batch
+        x, y = batch[0], batch[1]
+        cond = self._get_cond(batch)
         if len(x.shape) > 5:
             x = x.squeeze(0)
             y = y.squeeze(0)
 
-        y_pred = torch.sigmoid(self(x))
+        y_pred = torch.sigmoid(self(x, cond=cond))
         loss = self.loss(y_pred, y)
 
         acc = accuracy(y_pred, x, y)

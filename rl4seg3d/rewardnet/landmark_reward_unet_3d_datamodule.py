@@ -4,7 +4,7 @@ from typing import Optional
 
 import nibabel as nib
 import numpy as np
-import skimage
+import skimage.draw as draw
 import torch
 from lightning import LightningDataModule
 from scipy import ndimage

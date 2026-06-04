@@ -573,6 +573,7 @@ class RLmodule3D(LightningModule):
         b_img, meta_dict = batch['img'].squeeze(0), batch['image_meta_dict']
         self._current_cond = self._get_cond(batch)
         id = meta_dict['case_identifier'][0]
+        view = meta_dict['view'][0]
         voxel_spacing = np.asarray([abs(meta_dict['resampled_affine'][0, 0, 0].cpu().numpy()),
                                      abs(meta_dict['resampled_affine'][0, 1, 1].cpu().numpy())])
 
@@ -624,7 +625,7 @@ class RLmodule3D(LightningModule):
                     if deformed_action.sum() == 0:
                         continue
 
-                    filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_weights.nii.gz"
+                    filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_weights_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
                                            filename,
                                            convert_to_numpy(b_img.squeeze(0)),
@@ -649,7 +650,7 @@ class RLmodule3D(LightningModule):
                         continue
 
                     time_seed = int(round(datetime.now().timestamp())) + int(factor*10)
-                    filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_contrast.nii.gz"
+                    filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_contrast_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
                                            filename,
                                            convert_to_numpy(b_img.squeeze(0)),
@@ -674,7 +675,7 @@ class RLmodule3D(LightningModule):
                         continue
 
                     time_seed = int(round(datetime.now().timestamp())) + int(blur*100)
-                    filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_blur.nii.gz"
+                    filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_blur_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
                                            filename,
                                            convert_to_numpy(b_img.squeeze(0)),
@@ -684,7 +685,7 @@ class RLmodule3D(LightningModule):
         else:
             if corrected_validity:
                 if self.hparams.predict_do_corrections:
-                    filename = f"{batch_idx}_{itr}_{int(round(datetime.now().timestamp()))}_{self.trainer.global_rank}_correction.nii.gz"
+                    filename = f"{batch_idx}_{itr}_{int(round(datetime.now().timestamp()))}_{self.trainer.global_rank}_correction_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
                                            filename,
                                            convert_to_numpy(b_img.squeeze(0)),

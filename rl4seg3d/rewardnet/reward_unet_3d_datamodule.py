@@ -9,12 +9,15 @@ from lightning import LightningDataModule
 from torch.utils.data import Dataset
 from torch.utils.data import random_split, DataLoader
 
+VIEW_MAP = {"a2c": 0, "a3c": 1, "a4c": 2}
+
 
 class RewardNet3DDataset(Dataset):
     """ Works with the output of 'utils.file_utils.save_batch_to_dataset """
-    def __init__(self, data_path, test_frac=0.1, test=False):
+    def __init__(self, data_path, num_views=0, test_frac=0.1, test=False):
         super().__init__()
         self.data_path = data_path
+        self.num_views = num_views
         self.img_list = []
 
         # only use /images/ folders to get number of individual entries
@@ -42,7 +45,13 @@ class RewardNet3DDataset(Dataset):
 
         y = (gt == pred)
 
-        return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+        stem = Path(self.img_list[idx]).name.replace(".nii.gz", "")
+        view_str = stem.rsplit("_", 1)[-1].lower()
+        view_id = VIEW_MAP.get(view_str, 0)
+
+        return (torch.tensor(x, dtype=torch.float32),
+                torch.tensor(y, dtype=torch.float32),
+                torch.tensor(view_id, dtype=torch.long))
 
 
 class RewardNet3DDataModule(LightningDataModule):
@@ -50,9 +59,10 @@ class RewardNet3DDataModule(LightningDataModule):
     DataModule used for semantic segmentation in geometric generalization project
     """
 
-    def __init__(self, data_path, *args, **kwargs):
+    def __init__(self, data_path, num_views=0, *args, **kwargs):
         super().__init__()
         self.data_path = data_path
+        self.num_views = num_views
 
     def prepare_data(self):
         """
@@ -74,14 +84,14 @@ class RewardNet3DDataModule(LightningDataModule):
         # the stage is used in the Pytorch Lightning trainer method, which you can call as fit (training, evaluation) or test, also you can use it for predict, not implemented here
 
         if stage == "fit" or stage is None:
-            train_set_full = RewardNet3DDataset(self.data_path)
+            train_set_full = RewardNet3DDataset(self.data_path, num_views=self.num_views)
             train_set_size = int(len(train_set_full) * 0.9)
             valid_set_size = len(train_set_full) - train_set_size
             self.train, self.validate = random_split(train_set_full, [train_set_size, valid_set_size])
 
         # Assign test dataset for use in dataloader(s)
         if stage == "test" or stage is None:
-            self.test = RewardNet3DDataset(self.data_path, test=True)
+            self.test = RewardNet3DDataset(self.data_path, num_views=self.num_views, test=True)
 
     # define your dataloaders
     # again, here defined for train, validate and test, not for predict as the project is not there yet.

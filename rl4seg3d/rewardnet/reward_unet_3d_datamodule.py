@@ -96,13 +96,13 @@ class RewardNet3DDataModule(LightningDataModule):
     # define your dataloaders
     # again, here defined for train, validate and test, not for predict as the project is not there yet.
     def train_dataloader(self):
-        return DataLoader(self.train, batch_size=1, num_workers=16)
+        return DataLoader(self.train, batch_size=1, num_workers=16, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.validate, batch_size=1, num_workers=8)
+        return DataLoader(self.validate, batch_size=1, num_workers=8, shuffle=False)
 
     def test_dataloader(self):
-        return DataLoader(self.test, batch_size=1, num_workers=8)
+        return DataLoader(self.test, batch_size=1, num_workers=8, shuffle=False)
 
 
 if __name__ == "__main__":

@@ -169,7 +169,7 @@ class Accuracy(Reward):
 
 class PixelWiseAccuracy(Reward):
     @torch.no_grad()
-    def __call__(self, pred, imgs, gt):
+    def __call__(self, pred, imgs, gt, *args, **kwargs):
         actions = torch.round(pred)
         assert actions.shape == gt.shape, \
             print(f"Actions shape {actions.shape} vs GT shape {gt.shape}")

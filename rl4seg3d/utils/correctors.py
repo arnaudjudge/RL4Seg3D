@@ -26,7 +26,7 @@ class Corrector:
 
 class AEMorphoCorrector(Corrector):
     def __init__(self, ae_ckpt_path):
-        if ae_ckpt_path and Path(ae_ckpt_path).exists():
+        if ae_ckpt_path: # and Path(ae_ckpt_path).exists():
             self.ae_corrector = MorphologicalAndTemporalCorrectionAEApplicator(ae_ckpt_path)
 
     def correct_batch(self, b_img, b_act):

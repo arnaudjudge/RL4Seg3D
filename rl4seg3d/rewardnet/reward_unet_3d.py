@@ -8,9 +8,8 @@ from torch import nn, optim
 from torch.nn import functional as F
 from vital.models.segmentation.unet import UNet
 
-from rl4seg3d.rewardnet.unet_heads import UNet_multihead
 from rl4seg3d.utils.Metrics import accuracy
-from rl4seg3d.utils.logging_helper import log_sequence
+from rl4seg3d.utils.logging_helper import log_sequence, log_video
 
 import torch.distributions as distributions
 
@@ -65,7 +64,7 @@ class Reward3DOptimizer(LightningModule):
         return logs
 
     def validation_step(self, batch, batch_idx: int):
-        x, y = batch[0], batch[1]
+        x, y, view = batch[0], batch[1], batch[2].item()
         cond = self._get_cond(batch)
         if len(x.shape) > 5:
             x = x.squeeze(0)
@@ -82,15 +81,15 @@ class Reward3DOptimizer(LightningModule):
         # log images
         if self.trainer.local_rank == 0:
             idx = random.randint(0, len(x) - 1)  # which image to log
-            log_sequence(self.logger, img=x[idx], title='Image', number=batch_idx, epoch=self.current_epoch)
-            log_sequence(self.logger, img=y[idx], title='GroundTruth', number=batch_idx, epoch=self.current_epoch)
-            log_sequence(self.logger, img=y_pred[idx], title='Prediction', number=batch_idx,
+            log_sequence(self.logger, img=x[idx], title=f'Image_{view}', number=batch_idx, epoch=self.current_epoch)
+            log_sequence(self.logger, img=y[idx], title=f'GroundTruth_{view}', number=batch_idx, epoch=self.current_epoch)
+            log_sequence(self.logger, img=y_pred[idx], title=f'Prediction_{view}', number=batch_idx,
                       img_text=acc[idx].mean(), epoch=self.current_epoch)
 
         return {'loss': loss}
 
     def test_step(self, batch, batch_idx):
-        x, y = batch[0], batch[1]
+        x, y, view = batch[0], batch[1], batch[2].item()
         cond = self._get_cond(batch)
         if len(x.shape) > 5:
             x = x.squeeze(0)
@@ -106,9 +105,9 @@ class Reward3DOptimizer(LightningModule):
 
         if self.trainer.local_rank == 0:
             for i in range(len(x)):
-                log_sequence(self.logger, img=x[i], title='test_Image', number=batch_idx * (i + 1), epoch=self.current_epoch)
-                log_sequence(self.logger, img=y[i], title='test_GroundTruth', number=batch_idx * (i + 1), epoch=self.current_epoch)
-                log_sequence(self.logger, img=y_pred[i], title='test_Prediction', number=batch_idx * (i + 1),
+                log_video(self.logger, img=x[i][1].unsqueeze(0), title=f'test_Image_{view}', number=batch_idx * (i + 1), epoch=self.current_epoch)
+                log_video(self.logger, img=y[i], title=f'test_GroundTruth_{view}', number=batch_idx * (i + 1), epoch=self.current_epoch)
+                log_video(self.logger, img=y_pred[i], title=f'test_Prediction_{view}', number=batch_idx * (i + 1),
                           img_text=acc[i].mean(), epoch=self.current_epoch)
 
         return {'loss': loss}
@@ -135,7 +134,7 @@ class Reward3DOptimizer(LightningModule):
         logits_list = []
         labels_list = []
         with torch.no_grad():
-            for input, label in val_loader:
+            for input, label, _ in val_loader:
                 logits = self(input.to(self.device))
                 logits_list.append(torch.stack((1-logits, logits), dim=1).squeeze(2))
                 labels_list.append(label.squeeze(1).to(torch.long))

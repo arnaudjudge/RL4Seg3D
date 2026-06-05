@@ -28,7 +28,7 @@ class RL3dDataset(Dataset):
                  df,
                  data_path,
                  approx_gt_path = None,
-                 allow_real_gt=True,
+                 allow_real_gt=False,
                  available_gt=None,
                  common_spacing=None,
                  max_window_len=None,
@@ -299,6 +299,21 @@ class RL3dDataModule(LightningDataModule):
                 self.df.loc[self.test_idx, self.hparams.splits_column] = 'test'
                 self.df.to_csv(self.data_path + '/' + self.hparams.csv_file)
 
+        if self.hparams.max_image_area:
+            if not {'H', 'W'}.issubset(self.df.columns):
+                raise "MISSING KEY FOR MAX_IMAGE_AREA!"
+            self.df["expected_area"] = ((self.df["H"] * (self.df["dx"] * 10) / self.hparams.common_spacing[0]) *
+                                        (self.df["W"] * (self.df["dy"] * 10) / self.hparams.common_spacing[1]))
+            print(f"Removing {len(self.df[(self.df[self.hparams.splits_column].isin(['pred', 'train'])) & (self.df['expected_area'] > self.hparams.max_image_area)])} "
+                  f"entries with expected resampled area larger than {self.hparams.max_image_area} (before: {len(self.df['expected_area'])})")
+            self.df = self.df[((self.df[self.hparams.splits_column].isin(['pred', 'train'])) &
+                              (self.df["expected_area"] <= self.hparams.max_image_area)) |
+                              (~self.df[self.hparams.splits_column].isin(['pred', 'train']))]
+            # remake train_idx and pred_idx
+            self.train_idx = self.df.index[self.df[self.hparams.splits_column] == 'train'].tolist()
+            self.pred_idx = self.df.index[(self.df[self.hparams.splits_column] == 'pred')].tolist()
+            shuffle(self.pred_idx)
+
         if self.hparams.subset_frac and type(self.hparams.subset_frac) == float:
             train_num = int(self.hparams.subset_frac * len(self.train_idx))
             self.train_idx = self.train_idx[:train_num]
@@ -313,20 +328,6 @@ class RL3dDataModule(LightningDataModule):
             self.val_idx = self.val_idx[:min(self.hparams.subset_frac, len(self.val_idx))]
             self.test_idx = self.test_idx[:min(self.hparams.subset_frac, len(self.test_idx))]
             self.pred_idx = self.pred_idx[:min(self.hparams.subset_frac, len(self.pred_idx))]
-
-        if self.hparams.max_image_area:
-            if not {'H', 'W'}.issubset(self.df.columns):
-                raise "MISSING KEY FOR MAX_IMAGE_AREA!"
-            self.df["expected_area"] = ((self.df["H"] * (self.df["dx"] * 10) / self.hparams.common_spacing[0]) *
-                                        (self.df["W"] * (self.df["dy"] * 10) / self.hparams.common_spacing[1]))
-            print(f"Removing {len(self.df[(self.df[self.hparams.splits_column].isin(['pred', 'train'])) & (self.df['expected_area'] > self.hparams.max_image_area)])} "
-                  f"entries with expected resampled area larger than {self.hparams.max_image_area} (before: {len(self.df['expected_area'])})")
-            self.df = self.df[((self.df[self.hparams.splits_column].isin(['pred', 'train'])) &
-                              (self.df["expected_area"] <= self.hparams.max_image_area)) |
-                              (~self.df[self.hparams.splits_column].isin(['pred', 'train']))]
-            # remake train_idx and pred_idx
-            self.train_idx = self.df.index[self.df[self.hparams.splits_column] == 'train'].tolist()
-            self.pred_idx = self.df.index[(self.df[self.hparams.splits_column] == 'pred')].tolist()
 
         if stage == "fit" or stage is None:
             self.data_train = self.hparams.dataset(self.df.loc[self.train_idx],

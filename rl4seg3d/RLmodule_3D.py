@@ -583,9 +583,17 @@ class RLmodule3D(LightningModule):
         actions_unsampled, _, _ = self.rollout(b_img, torch.zeros_like(b_img).squeeze(1), sample=False,
                                                cond=self._current_cond)
 
-        corrected, corrected_validity, ae_comp, actions_unsampled_clean = self.pred_corrector.correct_single_seq(b_img.squeeze(0), actions_unsampled.squeeze(0), voxel_spacing)
-        actions_unsampled_clean = actions_unsampled_clean[None,]
-        corrected = corrected[None,]
+        is_a3c = view.lower() == 'a3c'
+
+        if is_a3c:
+            # corrector not trained on A3C — skip it and use unsampled prediction directly as pseudo-GT
+            actions_unsampled_clean = actions_unsampled.cpu().numpy()
+            corrected_validity = False
+            ae_comp = 1.0
+        else:
+            corrected, corrected_validity, ae_comp, actions_unsampled_clean = self.pred_corrector.correct_single_seq(b_img.squeeze(0), actions_unsampled.squeeze(0), voxel_spacing)
+            actions_unsampled_clean = actions_unsampled_clean[None,]
+            corrected = corrected[None,]
 
         initial_params = copy.deepcopy(self.actor.actor.net.state_dict())
         itr = 0
@@ -600,7 +608,16 @@ class RLmodule3D(LightningModule):
             self.trainer.datamodule.add_to_gt(id)
 
             if self.hparams.predict_do_model_perturb:
-                for j, multiplier in enumerate([0.1, 0.15, 0.2, 0.25]):  # have been adapted from 2d
+                # level 0 uses fixed mult=0.1; subsequent levels are scaled to hit target degradations
+                # rate is updated from each level's observation to track the local nonlinearity
+                target_degradations = [0.05, 0.12, 0.22]  # 1-dice targets for levels 1, 2, 3
+                multiplier = 0.1
+                degrad_rate = None  # estimated as (1-dice)/mult, updated every level
+
+                for j in range(4):
+                    if j > 0 and degrad_rate is not None:
+                        multiplier = min(target_degradations[j - 1] / degrad_rate, 20.0)
+
                     # get random seed based on time to maximise randomness of noise and subsequent predictions
                     # explore as much space around policy as possible
                     time_seed = int(round(datetime.now().timestamp())) + j
@@ -612,7 +629,7 @@ class RLmodule3D(LightningModule):
                     # add noise to params
                     with torch.no_grad():
                         for param in self.actor.actor.net.parameters():
-                            param.add_(torch.randn(param.size()).to(next(self.actor.actor.net.parameters()).device) * multiplier)
+                            param.add_(torch.randn(param.size()).to(next(self.actor.actor.net.parameters()).device) * multiplier * param.data.norm() / param.data.numel() ** 0.5)
 
                     # make prediction
                     deformed_action, *_ = self.actor.actor(b_img,
@@ -623,7 +640,15 @@ class RLmodule3D(LightningModule):
                         deformed_action = torch.round(deformed_action)
 
                     if deformed_action.sum() == 0:
+                        if j == 0:
+                            degrad_rate = 1.0
                         continue
+
+                    d = dice_score(deformed_action, torch.tensor(actions_unsampled_clean, device=deformed_action.device))
+                    d_val = d.mean().item()
+                    print(f"[weights mult={multiplier:.3f}] dice vs clean: {d_val:.3f}")
+
+                    degrad_rate = max((1 - d_val) / multiplier, 1e-4)
 
                     filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_weights_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
@@ -633,7 +658,7 @@ class RLmodule3D(LightningModule):
                                            convert_to_numpy(deformed_action))
                 self.actor.actor.net.load_state_dict(initial_params)
             if self.hparams.predict_do_img_perturb:
-                contrast_factors = [0.4, 0.05]  # check this !!!
+                contrast_factors = [0.4, 0.05]  # NOTE: near-zero effect observed — model appears contrast-invariant
                 for factor in contrast_factors:
                     in_img = copy.deepcopy(b_img)
                     in_img = adjust_contrast(in_img.permute((4, 0, 1, 2, 3)), factor).permute((1, 2, 3, 4, 0))
@@ -649,6 +674,9 @@ class RLmodule3D(LightningModule):
                     if contr_action.sum() == 0:
                         continue
 
+                    d = dice_score(contr_action, torch.tensor(actions_unsampled_clean, device=contr_action.device))
+                    print(f"[contrast factor={factor:.2f}] dice vs clean: {d.mean():.3f}")
+
                     time_seed = int(round(datetime.now().timestamp())) + int(factor*10)
                     filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_contrast_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
@@ -657,7 +685,7 @@ class RLmodule3D(LightningModule):
                                            convert_to_numpy(actions_unsampled_clean),
                                            convert_to_numpy(contr_action))
 
-                gaussian_blurs = [0.3, 0.6]
+                gaussian_blurs = [0.3, 1.0, 1.5]
                 for blur in gaussian_blurs:
                     in_img = b_img.clone()
                     in_img += torch.randn(in_img.size()).to(next(self.actor.actor.net.parameters()).device) * blur
@@ -674,6 +702,9 @@ class RLmodule3D(LightningModule):
                     if blurred_action.sum() == 0:
                         continue
 
+                    d = dice_score(blurred_action, torch.tensor(actions_unsampled_clean, device=blurred_action.device))
+                    print(f"[blur std={blur:.2f}] dice vs clean: {d.mean():.3f}")
+
                     time_seed = int(round(datetime.now().timestamp())) + int(blur*100)
                     filename = f"{batch_idx}_{itr}_{time_seed}_{self.trainer.global_rank}_blur_{view}.nii.gz"
                     save_to_reward_dataset(self.hparams.predict_save_dir,
@@ -683,6 +714,7 @@ class RLmodule3D(LightningModule):
                                            convert_to_numpy(blurred_action))
 
         else:
+            print(f"INVALID - {view} -  {ae_comp}")
             if corrected_validity:
                 if self.hparams.predict_do_corrections:
                     filename = f"{batch_idx}_{itr}_{int(round(datetime.now().timestamp()))}_{self.trainer.global_rank}_correction_{view}.nii.gz"

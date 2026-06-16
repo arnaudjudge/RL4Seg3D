@@ -44,14 +44,23 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
             self.net.load_state_dict(m_state_dict, strict=False)
 
     def _get_cond(self, batch) -> Tensor | None:
-        """Return a float one-hot tensor (B, num_views) for the batch's view, or None."""
+        """Return a view conditioning tensor for the batch, or None.
+
+        FiLMUNet (view_embed): returns LongTensor of shape (B,) — integer view indices.
+        Additive/AdaIN (cond_projectors): returns float one-hot of shape (B, num_views).
+        """
         if self.hparams.num_views <= 0 or 'view_as_id' not in batch:
             return None
-        view_id = batch['view_as_id'].long()   # shape (B,) after DataLoader collate
-        return F.one_hot(view_id, num_classes=self.hparams.num_views).float().to(self.device)
+        view_id = batch['view_as_id'].long().to(self.device)   # shape (B,)
+        if hasattr(self.net, 'view_embed'):
+            return view_id
+        return F.one_hot(view_id, num_classes=self.hparams.num_views).float()
+
+    def _has_cond(self) -> bool:
+        return hasattr(self.net, 'view_embed') or hasattr(self.net, 'cond_projectors')
 
     def forward(self, x, cond=None):
-        use_cond = cond is not None and hasattr(self.net, 'cond_projectors')
+        use_cond = cond is not None and self._has_cond()
         out = self.net.forward(x, cond) if use_cond else self.net.forward(x)
         if self.net.num_classes > 1:
             out = torch.softmax(out, dim=1)
@@ -61,9 +70,11 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
 
     def sliding_window_inference(self, image):
         cond = getattr(self, '_current_cond', None)
-        if cond is not None and hasattr(self.net, 'cond_projectors'):
+        if cond is not None and self._has_cond():
             def _net(x):
-                return self.net(x, cond.expand(x.shape[0], -1))
+                # LongTensor (FiLM): expand to (B,); float tensor (additive): expand to (B, C)
+                c = cond.expand(x.shape[0]) if cond.dim() == 1 else cond.expand(x.shape[0], -1)
+                return self.net(x, c)
             return self.inferer(inputs=image, network=_net)
         return self.inferer(inputs=image, network=self.net)
 
@@ -75,7 +86,7 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
         x, y = batch['img'].squeeze(0), batch['gt'].squeeze(0)
         cond = self._get_cond(batch)
         if cond is not None:
-            cond = cond.expand(x.shape[0], -1)
+            cond = cond.expand(x.shape[0]) if cond.dim() == 1 else cond.expand(x.shape[0], -1)
         y_hat = self.forward(x, cond)
 
         loss = self.loss(y_hat, y)
@@ -97,7 +108,8 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
         for i in range(0, b_imgs.shape[0], self.hparams.val_batch_size):
             b_img = b_imgs[i:i + self.hparams.val_batch_size]
             b_gt = b_gts[i:i + self.hparams.val_batch_size]
-            cond = base_cond.expand(b_img.shape[0], -1) if base_cond is not None else None
+            cond = (base_cond.expand(b_img.shape[0]) if base_cond.dim() == 1
+                    else base_cond.expand(b_img.shape[0], -1)) if base_cond is not None else None
 
             y_pred = self.forward(b_img, cond)
 

@@ -354,6 +354,7 @@ class RL3dDataModule(LightningDataModule):
                                                    max_tensor_volume=self.hparams.max_tensor_volume,
                                                    shape_divisible_by=list(self.hparams.shape_divisible_by),
                                                    available_gt=None,
+                                                   allow_real_gt=self.hparams.supervised,
                                                    *self.args,
                                                    **self.kwargs,
                                                    )

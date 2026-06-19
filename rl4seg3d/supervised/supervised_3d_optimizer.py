@@ -62,10 +62,10 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
     def forward(self, x, cond=None):
         use_cond = cond is not None and self._has_cond()
         out = self.net.forward(x, cond) if use_cond else self.net.forward(x)
-        if self.net.num_classes > 1:
-            out = torch.softmax(out, dim=1)
-        else:
-            out = torch.sigmoid(out).squeeze(1)
+        # if self.net.num_classes > 1:
+        #     out = torch.softmax(out, dim=1)
+        # else:
+        #     out = torch.sigmoid(out).squeeze(1)
         return out
 
     def sliding_window_inference(self, image):
@@ -89,7 +89,8 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
             cond = cond.expand(x.shape[0]) if cond.dim() == 1 else cond.expand(x.shape[0], -1)
         y_hat = self.forward(x, cond)
 
-        loss = self.loss(y_hat, y)
+        # DC_and_CE_loss expects logits (B, C, ...) and a channel-dim target (B, 1, ...)
+        loss = self.loss(y_hat, y.unsqueeze(1).long())
 
         logs = {
             'loss': loss,
@@ -113,12 +114,12 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
 
             y_pred = self.forward(b_img, cond)
 
-            loss = self.loss(y_pred, b_gt)
+            loss = self.loss(y_pred, b_gt.unsqueeze(1).long())
 
             if self.net.num_classes > 1:
                 y_pred = y_pred.argmax(dim=1)
             else:
-                y_pred = torch.round(y_pred)
+                y_pred = torch.round(torch.sigmoid(y_pred))
 
             acc = accuracy(y_pred, b_img, b_gt)
             dice = dice_score(y_pred, b_gt)
@@ -163,9 +164,6 @@ class Supervised3DOptimizer(nnUNetPatchlessLitModule):
         else:
             y_pred = self.predict(b_img)
         print(f"\n{'TTA' if self.tta else 'Simple (No TTA)'} Prediction took {round(time.time() - start_time, 4)} (s).")
-
-
-        loss = self.loss(y_pred, b_gt.long())
 
         if self.num_classes > 1:
             y_pred = y_pred.argmax(dim=1)

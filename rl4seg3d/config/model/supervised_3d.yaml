@@ -1,12 +1,11 @@
 defaults:
-  - net: conditioned_unet
+  - net: conditioned_unet_film
   - optimizer: adam
   - scheduler: none
-  - loss: ce
+  - loss: dice_ce
   - /corrector: none
 
 _target_: rl4seg3d.supervised.supervised_3d_optimizer.Supervised3DOptimizer
-
 
 ckpt_path: null
 

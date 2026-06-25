@@ -1,18 +1,21 @@
 import os
+import json
 from pathlib import Path
 from typing import Tuple
+import re
 
 import hydra
 import nibabel as nib
 import pydicom
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 import torchio as tio
 from dotenv import load_dotenv
 from lightning import LightningModule
 from lightning import Trainer
 from monai import transforms
-from monai.data import DataLoader, ArrayDataset, MetaTensor
+from monai.data import DataLoader, MetaTensor
 from monai.transforms import MapTransform
 from monai.transforms import ToTensord
 from omegaconf import DictConfig
@@ -20,7 +23,20 @@ from omegaconf import DictConfig
 from patchless_nnunet import utils, setup_root
 from rl4seg3d.utils.preprocessing import apply_eq_adapthist, rescale
 
+
 log = utils.get_pylogger(__name__)
+
+# Must match the training mapping (rl4seg3d/datamodules/RL_3d_datamodule.py).
+VIEW_MAP = {"a2c": 0, "a3c": 1, "a4c": 2}
+
+
+def load_view_mapping(path):
+    """Load a {case_identifier: view_str} JSON mapping, or return {} if path is None."""
+    if not path:
+        return {}
+    with open(path) as f:
+        mapping = json.load(f)
+    return {str(k): str(v) for k, v in mapping.items()}
 
 
 def load_image(input_path):
@@ -118,6 +134,94 @@ class PatchlessPreprocess(MapTransform):
         return x, y, z
 
 
+class LazyEchoDataset(Dataset):
+    """Loads and preprocesses files on-demand instead of all at once."""
+
+    def __init__(self, input_path, transform=None, apply_eq_hist=False, file_match_regex=".*",
+                 view_mapping=None):
+        self.transform = transform
+        self.apply_eq_hist = apply_eq_hist
+        self.view_mapping = view_mapping or {}
+        self.input_files = self._collect_files(input_path, file_match_regex)
+
+    def _collect_files(self, input_path, file_match_regex):
+        input_path = Path(input_path)
+        if input_path.is_file() and input_path.suffix in (".dcm", ".nii") or \
+                "".join(input_path.suffixes[-2:]) == ".nii.gz":
+            files = [input_path]
+        elif input_path.is_dir():
+            files = (list(input_path.rglob('*.dcm')) +
+                     list(input_path.rglob("*.nii")) +
+                     list(input_path.rglob("*.nii.gz")))
+        else:
+            raise ValueError(f"Invalid input path: {input_path}")
+
+        files = [f for f in files if re.search(file_match_regex, f.as_posix())]
+
+        # Skip cases whose prediction already exists in the output dir.
+        _output_check_dir = "/data/landmarks_dataset_234ch/pred/base_model/"  # TODO: fill in output dir to check against
+        if _output_check_dir:
+            out_dir = Path(_output_check_dir)
+            kept = []
+            for f in files:
+                case_id = f.stem.split('.')[0].removesuffix("_0000")
+                if (out_dir / f"{case_id}.nii.gz").exists():
+                    print(f"Skipping {case_id}: prediction already exists in {out_dir}")
+                    continue
+                kept.append(f)
+            files = kept
+
+        return files
+
+    def __len__(self):
+        return len(self.input_files)
+
+    def __getitem__(self, idx):
+        input_file_p = self.input_files[idx]
+        data, aff, spacing = load_image(input_file_p)
+
+        if data.shape[-1] < 4:
+            print(f"Sequence too short with {data.shape[-1]} frames, skipping.")
+            # Return None and filter in collate, or raise to skip
+            return None
+
+        data = data[None,]
+        data = rescale(data)
+        if self.apply_eq_hist:
+            data = apply_eq_adapthist(data)
+        # TEMP: hardcoded spatial Gaussian blur for one run — DELETE AFTER.
+        # from scipy.ndimage import gaussian_filter
+        # _blur_sigma = 1.5  # in-plane blur strength (pixels); 0 = no change
+        # data = gaussian_filter(data, sigma=(0, _blur_sigma, _blur_sigma, 0))  # (C, H, W, T)
+
+        case_id = input_file_p.stem.split('.')[0].removesuffix("_0000")
+        meta = {
+            "filename_or_obj": case_id,
+            "spacing": spacing,
+            "original_affine": aff,
+        }
+        sample = {'image': MetaTensor(torch.tensor(data, dtype=torch.float32), meta=meta)}
+
+        if self.view_mapping:
+            view_str = self.view_mapping.get(case_id)
+            view_id = VIEW_MAP.get(str(view_str).lower()) if view_str is not None else None
+            if view_id is None:
+                print(f"WARNING: no usable view for {case_id} (got {view_str!r}); "
+                      f"prediction will be unconditioned.")
+            else:
+                sample['view_as_id'] = torch.tensor(view_id, dtype=torch.long)
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+def collate_skip_none(batch):
+    batch = [x for x in batch if x is not None]
+    return torch.utils.data.dataloader.default_collate(batch) if batch else None
+
+
 class RL4Seg3DPredictor:
     @classmethod
     def main(cls) -> None:
@@ -136,7 +240,7 @@ class RL4Seg3DPredictor:
         setup_root()
 
     @staticmethod
-    def get_array_dataset(input_path, apply_eq_hist=False):
+    def get_array_dataset(input_path, apply_eq_hist=False, file_match_regex=".*"):
         tensor_list = []
         # find all nifti files in input_path
         # open and get relevant information
@@ -156,9 +260,16 @@ class RL4Seg3DPredictor:
             raise ValueError(f"Invalid input path: {input_path}")
 
         for input_file_p in input_files:
+            if not re.search(file_match_regex, input_file_p.as_posix()):
+                continue
+            print(input_file_p)
             data, aff, spacing = load_image(input_file_p)
 
-            data = data[None,]  # add batch/channel dim
+            if data.shape[-1] < 4:
+                print(f"Sequence too short with {data.shape[-1]} frames, cannot be processed by this model!")
+                continue
+
+            data = data[None,] # add batch/channel dim
             data = rescale(data)
             if apply_eq_hist:
                 data = apply_eq_adapthist(data)
@@ -212,8 +323,15 @@ class RL4Seg3DPredictor:
                                            save_to_gif=cfg.save_as_gif)
         tf = transforms.compose.Compose([preprocessed, ToTensord(keys="image", track_meta=True)])
 
-        numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist)
-        dataset = ArrayDataset(img=numpy_arr_data, img_transform=tf)
+        # numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist, cfg.file_filter_regex)
+        view_mapping = load_view_mapping(cfg.get("view_mapping", None))
+        dataset = LazyEchoDataset(
+            input_path=cfg.input_path,
+            transform=tf,
+            apply_eq_hist=cfg.apply_eq_hist,
+            file_match_regex=cfg.file_filter_regex,
+            view_mapping=view_mapping,
+        )
 
         dataloader = DataLoader(
             dataset=dataset,
@@ -221,19 +339,31 @@ class RL4Seg3DPredictor:
             num_workers=cfg.num_workers,
             pin_memory=cfg.pin_memory,
             shuffle=False,
+            collate_fn=collate_skip_none,  # handles short-sequence Nones
         )
 
         log.info("Starting predicting!")
         log.info(f"Using checkpoint: {cfg.ckpt_path}")
-        if torch.load(cfg.ckpt_path).get("pytorch-lightning_version", None):
-            trainer.predict(model=model, dataloaders=dataloader, ckpt_path=cfg.ckpt_path)
-        else:
-            model.net.load_state_dict(torch.load(cfg.ckpt_path))
-            trainer.predict(model=model, dataloaders=dataloader)
+        # Checkpoint holds only the segmentation net (saved by Supervised3DOptimizer).
+        # It may be a raw net state_dict, or a Lightning checkpoint whose weights are under
+        # 'state_dict' with a leading 'net.' prefix. Either way, load into actor.actor.net.
+        ckpt = torch.load(cfg.ckpt_path, map_location="cpu")
+        sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+        sd = {(k[len("net."):] if k.startswith("net.") else k): v for k, v in sd.items()}
+        model.actor.actor.net.load_state_dict(sd)
 
-        metric_dict = trainer.callback_metrics
+        # TEMP: inject small Gaussian noise into net weights before predicting — DELETE AFTER.
+        # _noise = 0.5  # relative scale (fraction of each param's RMS magnitude)
+        # with torch.no_grad():
+        #     for p in model.actor.actor.net.parameters():
+        #         rms = p.data.pow(2).mean().sqrt()
+        #         p.add_(torch.randn_like(p) * _noise * rms)
 
-        return metric_dict, object_dict
+        trainer.predict(model=model, dataloaders=dataloader)
+
+        #metric_dict = trainer.callback_metrics
+
+        #return metric_dict, object_dict
 
 
 def main():

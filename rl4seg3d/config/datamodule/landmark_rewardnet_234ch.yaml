@@ -1,7 +1,7 @@
 _target_: rl4seg3d.rewardnet.landmark_reward_unet_3d_datamodule.RewardNet3DDataModule
 
-data_path: /data/landmarks_cardinal-icardio/
-test_fra: 0.1
+data_path: /data/landmarks_dataset_234ch/
+test_fra: 0.05
 num_views: 3
 # {filename_stem: view_str} JSON. null auto-detects view_mapping.json in data_path.
 view_mapping_file: null

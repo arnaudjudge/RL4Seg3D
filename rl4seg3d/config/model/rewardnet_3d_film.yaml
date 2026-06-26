@@ -1,0 +1,13 @@
+defaults:
+  - net: conditioned_unet_film
+
+_target_: rl4seg3d.rewardnet.reward_unet_3d.Reward3DOptimizer
+
+save_model_path: ./reward_net_3d.ckpt
+# FiLM view conditioning (a2c, a3c, a4c -> 3 views). Must match the datamodule's num_views.
+num_views: 3
+
+net:
+  # reward net stacks (img, pred) -> 1-channel landmark map
+  in_channels: 2
+  num_classes: 1

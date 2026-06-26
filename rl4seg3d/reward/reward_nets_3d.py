@@ -9,7 +9,7 @@ from monai.data import MetaTensor
 from torch import Tensor
 
 from patchless_nnunet.utils.inferers import SlidingWindowInferer
-from rl4seg3d.actors.Actors_3d import _zero_missing_cond_projectors
+from rl4seg3d.actors.Actors_3d import _net_supports_cond, _zero_missing_cond_projectors
 from rl4seg3d.reward.generic_reward import Reward
 
 """
@@ -20,9 +20,9 @@ Reward functions must each have pred, img, gt as input parameters
 def _reward_net_forward(net, stack, cond):
     """Call reward net with cond when supported, otherwise plain forward.
 
-    Supports legacy plain-UNet reward checkpoints alongside ConditionedUNet ones.
+    Supports legacy plain-UNet reward checkpoints alongside ConditionedUNet/FiLMUNet ones.
     """
-    if cond is not None and hasattr(net, "cond_projectors"):
+    if cond is not None and _net_supports_cond(net):
         return net(stack, cond)
     return net(stack)
 
@@ -153,9 +153,11 @@ class RewardUnets3D(Reward):
         """Inference using sliding window, broadcasting cond to every patch batch."""
         results = []
         for n in self.get_nets():
-            if cond is not None and hasattr(n, "cond_projectors"):
+            if cond is not None and _net_supports_cond(n):
                 def _net(x, _n=n, _c=cond):
-                    return _n(x, _c.expand(x.shape[0], -1))
+                    # FiLM cond is a 1-D LongTensor (B,); additive cond is 2-D (B, C).
+                    c = _c.expand(x.shape[0]) if _c.dim() == 1 else _c.expand(x.shape[0], -1)
+                    return _n(x, c)
                 results.append(self.inferer(inputs=image, network=_net))
             else:
                 results.append(self.inferer(inputs=image, network=n))

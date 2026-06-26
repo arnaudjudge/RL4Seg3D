@@ -5,13 +5,23 @@ import torch.nn as nn
 from torch.distributions import Categorical
 
 
+def _net_supports_cond(net):
+    """True iff ``net`` accepts a view conditioning tensor in its forward().
+
+    Covers both conditioning variants: FiLMUNet (``view_embed``, expects integer
+    view indices) and the additive/AdaIN ConditionedUNet (``cond_projectors``,
+    expects a one-hot float tensor). Plain UNet checkpoints have neither.
+    """
+    return hasattr(net, "cond_projectors") or hasattr(net, "view_embed")
+
+
 def _forward_with_optional_cond(net, x, cond):
     """Call net(x, cond) iff net supports view conditioning, else net(x).
 
-    Keeps backward compatibility with plain UNet checkpoints (no cond_projectors)
-    while routing the view tensor through ConditionedUNet.
+    Keeps backward compatibility with plain UNet checkpoints (no cond_projectors/
+    view_embed) while routing the view tensor through a ConditionedUNet/FiLMUNet.
     """
-    if cond is not None and hasattr(net, "cond_projectors"):
+    if cond is not None and _net_supports_cond(net):
         return net(x, cond)
     return net(x)
 

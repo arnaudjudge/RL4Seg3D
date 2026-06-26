@@ -1,9 +1,10 @@
 from rl4seg3d.actors.Actors import Actor
+from rl4seg3d.actors.Actors_3d import _net_supports_cond
 
 
 def _critic_forward_with_optional_cond(critic, imgs, cond):
     """Mirror of Actors_3d helper: route cond to critic.net only when it's conditioned."""
-    if cond is not None and hasattr(critic.net, "cond_projectors"):
+    if cond is not None and _net_supports_cond(critic.net):
         return critic(imgs, cond)
     return critic(imgs)
 

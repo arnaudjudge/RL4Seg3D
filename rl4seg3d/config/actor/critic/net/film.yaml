@@ -1,13 +1,18 @@
-_target_: patchless_nnunet.models.components.unet.UNet
+_target_: rl4seg3d.supervised.conditioned_unet_film.FiLMUNet
+
+# FiLM view conditioning via a learned embedding (a2c, a3c, a4c -> 3 views).
+num_views: 3
+embed_dim: 16
+inject: all  # all | bottleneck | encoder | decoder
 
 in_channels: 1
-num_classes: 3
+num_classes: 1
 patch_size: [352, 288, 20]
 kernels: [[3, 3, 1], [3, 3, 3], [3, 3, 3], [3, 3, 3], [3, 3, 3], [3, 3, 3]]
 strides: [[1, 1, 1], [2, 2, 1], [2, 2, 2], [2, 2, 2], [2, 2, 1], [2, 2, 1]]
 normalization_layer: "instance"
 negative_slope: 1e-2
-deep_supervision: False
+deep_supervision: True
 attention: False
 drop_block: False
 residual: False

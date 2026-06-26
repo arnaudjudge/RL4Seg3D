@@ -92,16 +92,30 @@ class RLmodule3D(LightningModule):
     def configure_optimizers(self):
         return self.actor.get_optimizers()
 
-    def _get_cond(self, batch) -> Tensor | None:
-        """One-hot view conditioning tensor (B=1, num_views) from the batch, or None.
+    def _policy_net(self):
+        """Best-effort handle on the underlying policy network, for capability checks.
 
-        Each sample in the RL datamodule emits a single ``view_as_id`` scalar so the
-        returned tensor has batch dim 1; expand to the per-step batch at the call site.
+        Used only to decide the conditioning *format* (FiLM indices vs one-hot); returns
+        None if the actor doesn't expose a ``.net`` (then we fall back to one-hot).
+        """
+        return getattr(getattr(self.actor, 'actor', None), 'net', None)
+
+    def _get_cond(self, batch) -> Tensor | None:
+        """View conditioning tensor from the batch, or None.
+
+        FiLMUNet (``view_embed``) expects an integer LongTensor of shape (B,); the
+        additive/AdaIN ConditionedUNet (``cond_projectors``) expects a one-hot float
+        tensor of shape (B, num_views). Each RL sample emits a single ``view_as_id``
+        scalar, so the returned tensor has batch dim 1; expand to the per-step batch
+        at the call site via ``_expand_cond``.
         """
         if self.hparams.num_views <= 0 or batch is None or 'view_as_id' not in batch:
             return None
-        view_id = batch['view_as_id'].long().view(-1)
-        return F.one_hot(view_id, num_classes=self.hparams.num_views).float().to(self.device)
+        view_id = batch['view_as_id'].long().view(-1).to(self.device)
+        net = self._policy_net()
+        if net is not None and hasattr(net, 'view_embed'):
+            return view_id
+        return F.one_hot(view_id, num_classes=self.hparams.num_views).float()
 
     @torch.no_grad()  # no grad since tensors are reused in PPO's for loop
     def rollout(self, imgs: torch.tensor, gt: torch.tensor, use_gt: torch.tensor = None,
@@ -134,6 +148,9 @@ class RLmodule3D(LightningModule):
             return None
         if cond.shape[0] == batch_size:
             return cond
+        # FiLM cond is a 1-D LongTensor (B,); additive cond is 2-D (B, num_views).
+        if cond.dim() == 1:
+            return cond.expand(batch_size)
         return cond.expand(batch_size, -1)
 
     def training_step(self, batch: dict[str, Tensor], nb_batch):
@@ -523,7 +540,13 @@ class RLmodule3D(LightningModule):
         """Inference using sliding window, broadcasting ``self._current_cond`` to each patch batch."""
         cond = self._current_cond
         net = self.actor.actor.net
+        if cond is not None and hasattr(net, "view_embed"):
+            # FiLMUNet: LongTensor of view indices, shape (B,)
+            def _net(x, _n=net, _c=cond):
+                return _n(x, _c.expand(x.shape[0]))
+            return self.inferer(inputs=image, network=_net)
         if cond is not None and hasattr(net, "cond_projectors"):
+            # additive/AdaIN ConditionedUNet: one-hot float, shape (B, num_views)
             def _net(x, _n=net, _c=cond):
                 return _n(x, _c.expand(x.shape[0], -1))
             return self.inferer(inputs=image, network=_net)

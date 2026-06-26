@@ -30,7 +30,8 @@ def log_image(logger, img, title, number=0, img_text=None, epoch=0):
         logger.experiment.add_image(title, img[None,], global_step=number)
     if isinstance(logger, CometLogger):
         fig = plt.figure()
-        plt.imshow(img, cmap='gray')
+        # fixed range so a uniform map doesn't autoscale to all-black (img is uint8 [0,255]).
+        plt.imshow(img, cmap='gray', vmin=0, vmax=255)
         plt.axis("off")
         # logger.experiment.log_image(title, img, number)
         logger.experiment.log_figure("{}_{}".format(title, number), fig, step=epoch)
@@ -57,7 +58,9 @@ def log_sequence(logger, img, title, number=0, img_text=None, epoch=0):
             img = img.squeeze(0)
         else:
             img = img[1]
-        plt.imshow(img, cmap='gray')
+        # fixed range: img is uint8 in [0,255]; without this matplotlib autoscales
+        # per-image, so a uniform (e.g. all-ones) map gets vmin==vmax and renders black.
+        plt.imshow(img, cmap='gray', vmin=0, vmax=255)
         plt.axis("off")
         logger.experiment.log_figure("{}_{}".format(title, number), fig, step=epoch)
         plt.close()

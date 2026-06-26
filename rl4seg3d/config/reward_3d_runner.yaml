@@ -5,8 +5,8 @@ logger_run_name: '${get_class_name: ${model._target_}}_${run_name}'
 
 defaults:
   - logger: comet
-  - model: rewardnet_3d
-  - datamodule: rewardnet_diff_3d
+  - model: rewardnet_3d_film
+  - datamodule: landmark_rewardnet_234ch
   - callbacks: default
 
   - _self_
@@ -18,7 +18,7 @@ model:
 
 callbacks:
   model_checkpoint:
-    monitor: val_loss
+    monitor: val/loss
     mode: min
 
 run_predict: False
@@ -27,7 +27,7 @@ train: True
 
 trainer:
   _target_: lightning.pytorch.Trainer
-  max_epochs: 100
+  max_epochs: 50
   log_every_n_steps: 1
   accelerator: gpu
   accumulate_grad_batches: 16

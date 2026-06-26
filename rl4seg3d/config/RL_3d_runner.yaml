@@ -15,7 +15,7 @@ seed: 1
 
 datamodule:
 #  subset_frac: 1.0
-  gt_column: Gt_0
+  gt_column: None
 
 predict_subset_frac: 0
 train: True

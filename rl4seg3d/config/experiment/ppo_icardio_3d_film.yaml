@@ -8,8 +8,8 @@ defaults:
   - override /model: ppo_3d
   - override /datamodule: maple
   - override /actor/actor@model.actor.actor: categorical_3d_unet_actor
-  - override /actor/actor/net@model.actor.actor.net: film
-  - override /actor/critic/net@model.actor.critic.net: film
+#  - override /actor/actor/net@model.actor.actor.net: film
+#  - override /actor/critic/net@model.actor.critic.net: film
   - override /reward@model.reward: rewardunets_3d
   - override /model/net@model.reward.net: conditioned_unet_film
   - override /corrector@model.corrector: ae

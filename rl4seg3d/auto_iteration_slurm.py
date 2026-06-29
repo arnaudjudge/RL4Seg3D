@@ -52,28 +52,28 @@ def main(cfg):
 
     print(f"starting data path: {checkpoint_dict['start_data_path']}")
     if checkpoint_dict['current_it'] < 1:
-        if not checkpoint_dict['pretrain_path']:
-            # train supervised network for initial actor
-            overrides = checkpoint_dict['main_overrides'] + checkpoint_dict['trainer_overrides'] + [f"trainer.max_epochs={cfg.sup_num_epochs}",
-                                                              f'model.predict_save_dir={None}',  # no predictions here
-                                                              f"model.ckpt_path={output_path}/{0}/actor.ckpt",
-                                                              f"model.loss.label_smoothing={cfg.sup_loss_label_smoothing}",
-                                                              f"experiment=supervised_{checkpoint_dict['source_experiment']}"]
-            sub_cfg = compose(config_name=f"supervised_runner.yaml", overrides=overrides)
-            print(OmegaConf.to_yaml(sub_cfg))
-
-            # prepare dataset with custom split and gt column
-            if checkpoint_dict['experiment_split_column'] != sub_cfg.datamodule.splits_column:
-                df = pd.read_csv(sub_cfg.datamodule.data_dir + sub_cfg.datamodule.csv_file, index_col=0)
-                df[checkpoint_dict['experiment_split_column']] = df.loc[:, sub_cfg.datamodule.splits_column]
-                df[checkpoint_dict['experiment_gt_column']] = df.loc[:, sub_cfg.datamodule.gt_column]
-                df.to_csv(sub_cfg.datamodule.data_dir + sub_cfg.datamodule.csv_file)
-            sub_cfg.datamodule.splits_column = checkpoint_dict['experiment_split_column']
-            sub_cfg.datamodule.gt_column = checkpoint_dict['experiment_gt_column']
-            OmegaConf.save(sub_cfg, "config.yaml")
-            # torch.distributed.new_group(ranks=[0, 1, 2, 3], timeout=datetime.timedelta(seconds=1800), backend="nccl"
-            subprocess.run(
-                shlex.split(f"python {os.environ['RL4SEG3D_HOME_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={cfg.sup_time} --multirun"))
+        # if not checkpoint_dict['pretrain_path']:
+            # # train supervised network for initial actor
+            # overrides = checkpoint_dict['main_overrides'] + checkpoint_dict['trainer_overrides'] + [f"trainer.max_epochs={cfg.sup_num_epochs}",
+            #                                                   f'model.predict_save_dir={None}',  # no predictions here
+            #                                                   f"model.ckpt_path={output_path}/{0}/actor.ckpt",
+            #                                                   f"model.loss.label_smoothing={cfg.sup_loss_label_smoothing}",
+            #                                                   f"experiment=supervised_{checkpoint_dict['source_experiment']}"]
+            # sub_cfg = compose(config_name=f"supervised_runner.yaml", overrides=overrides)
+            # print(OmegaConf.to_yaml(sub_cfg))
+            #
+            # # prepare dataset with custom split and gt column
+            # if checkpoint_dict['experiment_split_column'] != sub_cfg.datamodule.splits_column:
+            #     df = pd.read_csv(sub_cfg.datamodule.data_dir + sub_cfg.datamodule.csv_file, index_col=0)
+            #     df[checkpoint_dict['experiment_split_column']] = df.loc[:, sub_cfg.datamodule.splits_column]
+            #     df[checkpoint_dict['experiment_gt_column']] = df.loc[:, sub_cfg.datamodule.gt_column]
+            #     df.to_csv(sub_cfg.datamodule.data_dir + sub_cfg.datamodule.csv_file)
+            # sub_cfg.datamodule.splits_column = checkpoint_dict['experiment_split_column']
+            # sub_cfg.datamodule.gt_column = checkpoint_dict['experiment_gt_column']
+            # OmegaConf.save(sub_cfg, "config.yaml")
+            # # torch.distributed.new_group(ranks=[0, 1, 2, 3], timeout=datetime.timedelta(seconds=1800), backend="nccl"
+            # subprocess.run(
+            #     shlex.split(f"python {os.environ['RL4SEG3D_HOME_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={cfg.sup_time} --multirun"))
 
         # Predict and test (baseline) on target domain
         overrides = checkpoint_dict['main_overrides'] + checkpoint_dict['trainer_overrides'] + cfg.rl_overrides + [f"trainer.max_epochs=0",

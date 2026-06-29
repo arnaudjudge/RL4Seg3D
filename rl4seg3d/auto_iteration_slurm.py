@@ -93,10 +93,11 @@ def main(cfg):
         if checkpoint_dict['experiment_split_column'] != sub_cfg.datamodule.splits_column:
             df = pd.read_csv(sub_cfg.datamodule.data_dir + sub_cfg.datamodule.csv_file, index_col=0)
             df[checkpoint_dict['experiment_split_column']] = df.loc[:, sub_cfg.datamodule.splits_column]
-            df[checkpoint_dict['experiment_gt_column']] = df.loc[:, sub_cfg.datamodule.gt_column]
+            # gt column no longer used
+            # df[checkpoint_dict['experiment_gt_column']] = df.loc[:, sub_cfg.datamodule.gt_column]
             df.to_csv(sub_cfg.datamodule.data_dir + sub_cfg.datamodule.csv_file)
         sub_cfg.datamodule.splits_column = checkpoint_dict['experiment_split_column']
-        sub_cfg.datamodule.gt_column = checkpoint_dict['experiment_gt_column']
+        # sub_cfg.datamodule.gt_column = checkpoint_dict['experiment_gt_column']
 
         sub_cfg.save_csv_after_predict = \
             f"{sub_cfg.datamodule.data_dir}/{sub_cfg.datamodule.dataset_name}/{sub_cfg.datamodule.csv_file}"

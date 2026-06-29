@@ -1,5 +1,5 @@
 defaults:
-  - /model/net@net: unet
+  - /model/net@net: conditioned_unet_film
 
 _target_: rl4seg3d.reward.reward_nets_3d.RewardUnets3D
 

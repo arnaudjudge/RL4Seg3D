@@ -148,7 +148,7 @@ def main(cfg):
                      f"model.actor.actor.pretrain_ckpt={output_path}/{i - 1}/actor.ckpt",
                      f"model.actor.actor.ref_ckpt={output_path}/{i - 1}/actor.ckpt",
                      f"reward@model.reward={cfg.rl_reward_config_name}",
-                     f"model.reward.state_dict_path.anatomical={output_path}/{i - 1}/rewardnet.ckpt",
+                     f"model.reward.state_dict_paths.anatomical={output_path}/{i - 1}/rewardnet.ckpt",
                      # f"model.reward.temp_factor={float(saved_vars['Temperature_factor'])}",
                      f"model.actor_save_path={output_path}/{i}/actor.ckpt",
                      f"model.critic_save_path={output_path}/{i}/critic.ckpt",

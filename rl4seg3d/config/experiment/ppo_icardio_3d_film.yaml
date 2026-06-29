@@ -6,7 +6,7 @@
 
 defaults:
   - override /model: ppo_3d
-  - override /datamodule: icardio_3d
+  - override /datamodule: maple
   - override /actor/actor@model.actor.actor: categorical_3d_unet_actor
   - override /actor/actor/net@model.actor.actor.net: film
   - override /actor/critic/net@model.actor.critic.net: film

@@ -9,7 +9,7 @@ defaults:
   - datamodule: ???
   - callbacks: default
   - _self_
-  - experiment: ppo_icardio_3d
+  - experiment: ppo_icardio_3d_film
 
 seed: 1
 

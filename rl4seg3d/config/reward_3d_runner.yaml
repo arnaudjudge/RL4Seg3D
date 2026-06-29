@@ -6,7 +6,7 @@ logger_run_name: '${get_class_name: ${model._target_}}_${run_name}'
 defaults:
   - logger: comet
   - model: rewardnet_3d_film
-  - datamodule: landmark_rewardnet_234ch
+  - datamodule: landmark_rewardnet_diff_3d
   - callbacks: default
 
   - _self_

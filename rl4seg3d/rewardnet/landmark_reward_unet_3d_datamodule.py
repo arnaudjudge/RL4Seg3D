@@ -157,6 +157,19 @@ class RewardNet3DDataset(Dataset):
         return 0
 
     def __getitem__(self, idx):
+        # Some segmentations (especially base-perturbed ones) produce a base geometry that
+        # EchoMeasure._endo_base can't resolve into the 2 commissure markers. Skip those
+        # and advance to the next sample instead of crashing the data loader.
+        n = len(self.img_list)
+        for attempt in range(n):
+            j = (idx + attempt) % n
+            try:
+                return self._build_sample(j)
+            except (RuntimeError, ValueError, IndexError) as e:
+                print(f"Skipping reward sample {self.img_list[j]} ({e})")
+        raise RuntimeError("No valid reward-net sample found (all _endo_base lookups failed)")
+
+    def _build_sample(self, idx):
         pred_path = self.img_list[idx]
         img_nifti = nib.load(pred_path)
         pred = img_nifti.get_fdata()

@@ -20,9 +20,16 @@ def get_img_subpath(row):
     :param row: dataframe row with all columns filled in
     :return: string containing path to image file
     """
-    # combined datasets store each sub-dataset in its own folder; prepend it before study
-    prefix = f"{row['dataset']}/" if 'dataset' in row and pd.notna(row['dataset']) else ""
-    return f"{prefix}{row['study']}/{str(row['view']).lower()}/{row['dicom_uuid']}.nii.gz"
+    return f"{row['study']}/{str(row['view']).lower()}/{row['dicom_uuid']}.nii.gz"
+
+
+def get_dataset_dir(row):
+    """
+    Sub-dataset folder for a row in a combined dataset, as a path segment ('<dataset>/')
+    to insert before img/segmentation (i.e. <dataset>/img/<study>/...). Empty when there
+    is no 'dataset' column (single-dataset layout).
+    """
+    return f"{row['dataset']}/" if 'dataset' in row and pd.notna(row['dataset']) else ""
 
 
 class RL3dDataset(Dataset):
@@ -68,8 +75,10 @@ class RL3dDataset(Dataset):
 
     def __getitem__(self, idx):
         # Get paths and open images
-        sub_path = get_img_subpath(self.df.iloc[idx])
-        img_full = self.data_path + '/img/' + sub_path
+        row = self.df.iloc[idx]
+        sub_path = get_img_subpath(row)
+        dataset_dir = get_dataset_dir(row)
+        img_full = self.data_path + '/' + dataset_dir + 'img/' + sub_path
         if not os.path.exists(img_full):
             # TODO: legacy datasets used a _0000 suffix; drop once migrated
             img_full = img_full.replace('.nii.gz', '_0000.nii.gz')
@@ -78,7 +87,7 @@ class RL3dDataset(Dataset):
         if int(img.max()) > 1:
             img = img / 255
         if self.allow_real_gt or self.test:
-            mask = nib.load(self.data_path + '/segmentation/' + sub_path).get_fdata()
+            mask = nib.load(self.data_path + '/' + dataset_dir + 'segmentation/' + sub_path).get_fdata()
         else:
             mask = np.zeros_like(img)
         original_shape = np.asarray(list(img.shape))
@@ -433,8 +442,9 @@ class RL3dDataModule(LightningDataModule):
         idx = idx[:max(num_samples, len(idx))]
 
         for i in idx:
-            sub_path = get_img_subpath(self.df.iloc[i])
-            img_full = self.data_path + '/img/' + sub_path
+            row = self.df.iloc[i]
+            sub_path = get_img_subpath(row)
+            img_full = self.data_path + '/' + get_dataset_dir(row) + 'img/' + sub_path
             if not os.path.exists(img_full):
                 # TODO: legacy datasets used a _0000 suffix; drop once migrated
                 img_full = img_full.replace('.nii.gz', '_0000.nii.gz')

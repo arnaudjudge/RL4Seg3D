@@ -103,7 +103,7 @@ def main(cfg):
             f"{sub_cfg.datamodule.data_dir}/{sub_cfg.datamodule.dataset_name}/{sub_cfg.datamodule.csv_file}"
         OmegaConf.save(sub_cfg, "config.yaml")
         subprocess.run(
-            shlex.split(f"python {os.environ['RL4SEG3D_HOME_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={cfg.test_pred_time} --multirun"))
+            shlex.split(f"python {os.environ['RL4SEG3D_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={cfg.test_pred_time} --multirun"))
 
         checkpoint_dict['current_it'] = 1
         json.dump(checkpoint_dict, open(f"{output_path}/checkpoint_dict.json", "w"))
@@ -125,7 +125,7 @@ def main(cfg):
             print(OmegaConf.to_yaml(sub_cfg))
             OmegaConf.save(sub_cfg, "config.yaml")
             subprocess.run(
-                shlex.split(f"python {os.environ['RL4SEG3D_HOME_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={int(cfg.reward_time)*(i+1)} --multirun"))
+                shlex.split(f"python {os.environ['RL4SEG3D_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={int(cfg.reward_time)*(i+1)} --multirun"))
 
             checkpoint_dict['turn'] = 'RL'
             checkpoint_dict['current_it'] = i
@@ -169,7 +169,7 @@ def main(cfg):
         print(OmegaConf.to_yaml(sub_cfg))
         OmegaConf.save(sub_cfg, "config.yaml")
         subprocess.run(
-            shlex.split(f"python {os.environ['RL4SEG3D_HOME_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={int(cfg.rl_time)*(i+1)} --multirun"))
+            shlex.split(f"python {os.environ['RL4SEG3D_HOME']}/runner.py -cd ./ --config-name=config.yaml +launcher={cfg.run_launcher} hydra.launcher.timeout_min={int(cfg.rl_time)*(i+1)} --multirun"))
 
         checkpoint_dict['current_it'] = i
         checkpoint_dict['turn'] = 'reward'

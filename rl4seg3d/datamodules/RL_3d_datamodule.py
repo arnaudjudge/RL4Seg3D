@@ -20,7 +20,9 @@ def get_img_subpath(row):
     :param row: dataframe row with all columns filled in
     :return: string containing path to image file
     """
-    return f"{row['study']}/{str(row['view']).lower()}/{row['dicom_uuid']}.nii.gz"
+    # combined datasets store each sub-dataset in its own folder; prepend it before study
+    prefix = f"{row['dataset']}/" if 'dataset' in row and pd.notna(row['dataset']) else ""
+    return f"{prefix}{row['study']}/{str(row['view']).lower()}/{row['dicom_uuid']}.nii.gz"
 
 
 class RL3dDataset(Dataset):

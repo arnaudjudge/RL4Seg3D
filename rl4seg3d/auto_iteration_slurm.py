@@ -83,7 +83,7 @@ def main(cfg):
                                                                              "reward@model.reward=pixelwise_accuracy",  # will not be used
                                                                              f"model.actor_save_path={output_path}/{0}/actor.ckpt",  # no need
                                                                              f"model.critic_save_path=null",  # no need
-                                                                             f"model.predict_save_dir={output_path}/rewardDS/",
+                                                                             f"model.predict_save_dir={output_path}/rewardDS/{0}/",
                                                                              f"experiment=ppo_{checkpoint_dict['target_experiment']}",
                                                                              f"++save_csv_after_predict=null",
                                                                              f"++model.temp_files_path={output_path}"
@@ -147,12 +147,12 @@ def main(cfg):
                      # f"+datamodule.train_batch_size={8 * i}",
                      f"model.actor.actor.pretrain_ckpt={output_path}/{i - 1}/actor.ckpt",
                      f"model.actor.actor.ref_ckpt={output_path}/{i - 1}/actor.ckpt",
-                     f"reward@model.reward={cfg.rl_reward_config_name}"
+                     f"reward@model.reward={cfg.rl_reward_config_name}",
                      f"model.reward.state_dict_path.anatomical={output_path}/{i - 1}/rewardnet.ckpt",
                      # f"model.reward.temp_factor={float(saved_vars['Temperature_factor'])}",
                      f"model.actor_save_path={output_path}/{i}/actor.ckpt",
                      f"model.critic_save_path={output_path}/{i}/critic.ckpt",
-                     f'model.predict_save_dir={f"{output_path}/rewardDS/"}',
+                     f'model.predict_save_dir={f"{output_path}/rewardDS/{i}/"}',
                      f"model.entropy_coeff={0.15}",
                      f"model.divergence_coeff={0.015}",
                      f"experiment=ppo_{checkpoint_dict['target_experiment']}",

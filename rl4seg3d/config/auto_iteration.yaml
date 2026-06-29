@@ -10,7 +10,7 @@ output_path: ${oc.env:LOG_PATH}/${run_name}/
 pretrain_path: /data/rl_logs/run_1/0/actor.ckpt
 var_file: ${output_path}/variables.pkl
 
-target: icardio_3d
+target: icardio_3d_film
 source: camus
 
 #

@@ -14,7 +14,10 @@ class Reward:
         pass
 
     @torch.no_grad()
-    def predict_full_sequence(self, pred, imgs, gt):
+    def predict_full_sequence(self, pred, imgs, gt, *args, **kwargs):
+        # Accept (and ignore) view-conditioning kwargs like `cond` so rewards that
+        # don't support conditioning (e.g. accuracy rewards) stay callable from the
+        # conditioned pipeline. Cond-aware rewards override this method.
         return self(pred, imgs, gt)
 
     def get_reward_index(self, reward_name):

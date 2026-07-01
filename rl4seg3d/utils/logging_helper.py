@@ -4,9 +4,8 @@ matplotlib.use('Agg')
 import os
 
 import numpy as np
-import cv2
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from matplotlib import pyplot as plt, animation
 from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
 from matplotlib.colors import ListedColormap, LinearSegmentedColormap
@@ -16,7 +15,32 @@ logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
 
 def put_text_to_image(img, text):
-    return cv2.putText(img, "{:.3f}".format(text), (0, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (125), 2)
+    """Overlay '{:.3f}' near the top-left of a uint8 image using PIL.
+
+    Replacement for the old cv2.putText call so OpenCV isn't a dependency.
+    Draws in mid-gray (125) on the image's 2D spatial plane and returns an
+    array with the original shape and dtype. If the array isn't a plain 2D
+    (or single-channel) image the text is skipped rather than raising, since
+    this is only a debug overlay.
+    """
+    arr = np.asarray(img)
+    label = "{:.3f}".format(float(text))
+
+    plane = np.squeeze(arr)
+    if plane.ndim != 2:
+        # Not a simple 2D image; skip the overlay rather than fail logging.
+        return arr
+
+    pil_img = Image.fromarray(plane.astype(np.uint8), mode="L")
+    draw = ImageDraw.Draw(pil_img)
+    try:
+        font = ImageFont.load_default(size=24)
+    except TypeError:
+        # Older Pillow: load_default() takes no size argument.
+        font = ImageFont.load_default()
+    draw.text((0, 5), label, fill=125, font=font)
+
+    return np.asarray(pil_img).reshape(arr.shape).astype(arr.dtype)
 
 
 def log_image(logger, img, title, number=0, img_text=None, epoch=0):

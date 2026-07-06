@@ -47,7 +47,7 @@ class PPO3D(RLmodule3D):
         cond = self._expand_cond(self._get_cond(batch), b_img.shape[0])
 
         # get actions, log_probs, rewards, etc from pi (stays constant for all steps k)
-        prev_actions, prev_log_probs, prev_rewards = self.rollout(b_img, b_gt, b_use_gt, sample=False, cond=cond)
+        prev_actions, prev_log_probs, prev_rewards = self.rollout(b_img, b_gt, b_use_gt, cond=cond)
         num_rewards = len(prev_rewards)
 
         # iterate with pi prime k times

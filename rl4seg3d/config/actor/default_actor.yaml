@@ -7,3 +7,6 @@ _target_: rl4seg3d.actors.Actors.Actor
 eps_greedy_term: 0.0
 actor_lr: 0.01
 critic_lr: 0.005
+# LR multiplier for view-conditioning projection layers (much lower than base:
+# freshly-init'd projections shouldn't destabilise the pretrained net).
+proj_lr_mult: 0.001

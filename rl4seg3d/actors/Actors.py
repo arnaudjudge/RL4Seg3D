@@ -92,7 +92,8 @@ class Actor(nn.Module):
                  critic,
                  eps_greedy_term=0.0,
                  actor_lr=1e-3,
-                 critic_lr=1e-3):
+                 critic_lr=1e-3,
+                 proj_lr_mult=0.1):
         super().__init__()
 
         self.actor = actor
@@ -100,15 +101,39 @@ class Actor(nn.Module):
 
         self.actor_lr = actor_lr
         self.critic_lr = critic_lr
+        # View-conditioning projection layers (FiLM/AdaIN `.proj.`, additive `*cond_projector*`,
+        # FiLM `view_embed`) are freshly (zero-)initialised on top of a pretrained net, so they
+        # train at a much lower LR to avoid destabilising the pretrained weights.
+        self.proj_lr_mult = proj_lr_mult
 
         self.eps_greedy_term = eps_greedy_term
 
+    @staticmethod
+    def _is_proj_param(name):
+        return ("view_embed" in name) or ("proj" in name)
+
+    def _net_param_groups(self, net, base_lr):
+        """Split a net's params into base and view-conditioning-projection groups.
+
+        The projection group gets ``base_lr * proj_lr_mult``. Falls back to a single
+        group when the net has no projection params (plain UNet).
+        """
+        proj, base = [], []
+        for name, p in net.named_parameters():
+            (proj if self._is_proj_param(name) else base).append(p)
+        if not proj:
+            return [{"params": base, "lr": base_lr}]
+        return [
+            {"params": base, "lr": base_lr},
+            {"params": proj, "lr": base_lr * self.proj_lr_mult},
+        ]
+
     def get_optimizers(self):
+        actor_opt = torch.optim.Adam(self._net_param_groups(self.actor.net, self.actor_lr))
         if self.critic is None:
-            return torch.optim.Adam(self.actor.net.parameters(), lr=self.actor_lr)
-        else:
-            return torch.optim.Adam(self.actor.net.parameters(), lr=self.actor_lr), \
-                   torch.optim.Adam(self.critic.net.parameters(), lr=self.critic_lr)
+            return actor_opt
+        critic_opt = torch.optim.Adam(self._net_param_groups(self.critic.net, self.critic_lr))
+        return actor_opt, critic_opt
 
     def act(self, imgs, sample=True, cond=None):
         """

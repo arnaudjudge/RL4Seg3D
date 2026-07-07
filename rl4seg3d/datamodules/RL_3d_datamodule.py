@@ -86,8 +86,12 @@ class RL3dDataset(Dataset):
         img = img_nifti.get_fdata()
         if int(img.max()) > 1:
             img = img / 255
-        if self.allow_real_gt or self.test:
-            mask = nib.load(self.data_path + '/' + dataset_dir + 'segmentation/' + sub_path).get_fdata()
+        seg_full = self.data_path + '/' + dataset_dir + 'segmentation/' + sub_path
+        # load real gt when explicitly allowed/testing, or for validation when the file exists
+        # (non-breaking: fall back to zeros if the segmentation is missing)
+        load_gt = self.allow_real_gt or self.test or (self.val and os.path.exists(seg_full))
+        if load_gt:
+            mask = nib.load(seg_full).get_fdata()
         else:
             mask = np.zeros_like(img)
         original_shape = np.asarray(list(img.shape))
@@ -164,7 +168,7 @@ class RL3dDataset(Dataset):
                 approx_gt = approx_gt.unsqueeze(0)
 
         return {'img': img.type(torch.float32),
-                'gt': mask.type(torch.LongTensor) if self.allow_real_gt or self.test else torch.zeros_like(torch.tensor(mask).type(torch.LongTensor)),
+                'gt': mask.type(torch.LongTensor) if load_gt else torch.zeros_like(torch.tensor(mask).type(torch.LongTensor)),
                 'approx_gt': approx_gt.type(torch.LongTensor),
                 'use_gt': torch.tensor([self.use_gt[idx] for _ in range(img.shape[0])]),
                 'image_meta_dict': {'case_identifier': self.df.iloc[idx]['dicom_uuid'],

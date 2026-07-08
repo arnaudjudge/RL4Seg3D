@@ -92,6 +92,9 @@ class Unet3DCritic(nn.Module):
 
     def forward(self, x, cond=None):
         y = _forward_with_optional_cond(self.net, x, cond)
-        if self.net.deep_supervision and self.net.training:
+        # Only unpack as deep-supervision levels when the net actually returns a list.
+        # FiLMUNet.forward returns a single tensor even with deep_supervision=True, and
+        # `for y_ in y` on a tensor would iterate the batch dim and corrupt the critic.
+        if self.net.deep_supervision and self.net.training and isinstance(y, (list, tuple)):
            return [torch.sigmoid(y_) for y_ in y]
         return torch.sigmoid(y)

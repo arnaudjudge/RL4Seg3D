@@ -47,6 +47,7 @@ class RLmodule3D(LightningModule):
                  predict_do_img_perturb=True,
                  predict_do_corrections=True,
                  predict_do_temporal_glitches=True,
+                 ae_comp_threshold=0.935,
                  save_on_test=True,
                  vae_on_test=False,
                  worst_frame_thresholds=None, #{"anatomical": 0.985},
@@ -365,7 +366,7 @@ class RLmodule3D(LightningModule):
         _, _, _, _, v, _ = self.actor.evaluate(b_img[..., :4], prev_actions[..., :4],
                                                 cond=self._expand_cond(self._current_cond, b_img.shape[0]))
 
-        if self.trainer.global_rank == 0 and batch_idx % 1 == 1232314:
+        if self.trainer.global_rank == 0 and batch_idx % 1 == 0:
             log_video(self.logger, img=b_gt, background=b_img.squeeze(0), title='test_GroundTruth', number=batch_idx,
                          epoch=self.current_epoch)
             log_video(self.logger, img=prev_actions, background=b_img.squeeze(0), title='test_Prediction',
@@ -627,7 +628,7 @@ class RLmodule3D(LightningModule):
             check_segmentation_validity(actions_unsampled_clean[0, ..., i].T, voxel_spacing, [0, 1, 2])
             for i in range(actions_unsampled_clean.shape[-1])]
 
-        if ae_comp > 0.95 and all(action_uns_anatomical_validity):
+        if ae_comp > self.hparams.ae_comp_threshold and all(action_uns_anatomical_validity):
             self.trainer.datamodule.add_to_gt(id)
 
             if self.hparams.predict_do_model_perturb:

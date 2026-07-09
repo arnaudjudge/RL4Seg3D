@@ -20,6 +20,11 @@ callbacks:
   model_checkpoint:
     monitor: val/loss
     mode: min
+  early_stopping:
+    _target_: lightning.pytorch.callbacks.EarlyStopping
+    monitor: val/loss
+    mode: min
+    patience: 8
 
 run_predict: False
 
@@ -30,6 +35,8 @@ trainer:
   max_epochs: 50
   log_every_n_steps: 1
   accelerator: gpu
+  precision: "bf16-mixed"
+  check_val_every_n_epoch: 2
   accumulate_grad_batches: 16
   devices: 1
   #num_sanity_val_steps: 0 # skip sanity check (convenient for debugging directly in train step)

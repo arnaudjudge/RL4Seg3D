@@ -18,6 +18,8 @@ class PPO3D(RLmodule3D):
                  k_steps_per_batch: int = 5,
                  entropy_coeff: float = 0.0,
                  divergence_coeff: float = 0.0,
+                 normalize_advantage: bool = False,
+                 advantage_norm_eps: float = 1e-5,
                  *args: Any,
                  **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -110,6 +112,15 @@ class PPO3D(RLmodule3D):
             # assert b_rewards.shape == v.shape
             adv = total_reward - v
 
+            # Optional per-sample advantage normalization: standardize this sample's
+            # pixel-wise advantage field to zero-mean/unit-var so gradient scale is
+            # decoupled from reward magnitude (a bad seg's large low-reward area no
+            # longer dominates the step). eps floors the denominator to limit the
+            # noise blow-up when advantages are genuinely tiny near convergence.
+            adv_raw_mean, adv_raw_std = adv.mean(), adv.std()
+            if self.hparams.normalize_advantage:
+                adv = (adv - adv_raw_mean) / (adv_raw_std + self.hparams.advantage_norm_eps)
+
         # PPO loss
         # importance ratio
         assert b_log_probs.shape == log_probs.shape
@@ -141,7 +152,8 @@ class PPO3D(RLmodule3D):
         # metrics dict
         metrics = {
                 'v': v.mean(),
-                'advantage': adv.mean(),
+                'advantage': adv_raw_mean,
+                'adv_std_raw': adv_raw_std,
                 'reward': b_rewards.mean(),
                 'log_probs': log_probs.mean(),
                 'ratio': ratio.mean(),

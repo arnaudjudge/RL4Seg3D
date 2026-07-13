@@ -59,7 +59,9 @@ def main(cfg):
         log_hyperparameters(object_dict)
 
     if cfg.train:
-        trainer.fit(train_dataloaders=datamodule, model=model)
+        if cfg.resume_path:
+            print(f"Resuming training from {cfg.resume_path}")
+        trainer.fit(train_dataloaders=datamodule, model=model, ckpt_path=cfg.resume_path)
 
     if cfg.trainer.max_epochs > 0 and cfg.train:
         ckpt_path = 'best'

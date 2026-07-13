@@ -25,6 +25,7 @@ callbacks:
     monitor: val/loss
     mode: min
     patience: 8
+    verbose: True
 
 run_predict: False
 

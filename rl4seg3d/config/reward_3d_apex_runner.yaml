@@ -1,0 +1,46 @@
+# Turnkey runner for training the APEX reward net on the apex-corruption dataset.
+#   python runner.py --config-name=reward_3d_apex_runner
+# Override the data path if the dataset lives elsewhere:
+#   ... datamodule.data_path=/path/to/apex_rewardDS
+work_dir: ${hydra:runtime.cwd}
+run_name: apex
+
+logger_run_name: '${get_class_name: ${model._target_}}_${run_name}'
+
+defaults:
+  - logger: comet
+  - model: rewardnet_3d_apex
+  - datamodule: rewardnet_diff_3d
+  - callbacks: default
+
+  - _self_
+
+seed: 1
+
+datamodule:
+  data_path: ./apex_rewardDS
+  num_views: 3            # FiLM view conditioning; must match model.num_views
+
+callbacks:
+  model_checkpoint:
+    monitor: val/loss
+    mode: min
+  early_stopping:
+    _target_: lightning.pytorch.callbacks.EarlyStopping
+    monitor: val/loss
+    mode: min
+    patience: 8
+    verbose: True
+
+run_predict: False
+
+train: True
+
+trainer:
+  _target_: lightning.pytorch.Trainer
+  max_epochs: 50
+  log_every_n_steps: 1
+  accelerator: gpu
+  precision: "bf16-mixed"
+  accumulate_grad_batches: 16
+  devices: 1

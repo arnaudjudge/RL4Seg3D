@@ -15,14 +15,17 @@ def get_img_subpath(row, suffix='', extension='.nii.gz'):
     return f"{row['study']}/{row['view'].lower()}/{row['dicom_uuid']}" + suffix + extension
 
 
-def save_to_reward_dataset(save_dir, filename, image, gt, action):
+def save_to_reward_dataset(save_dir, filename, image, gt, action, spacing=None):
     # make sure directories exist
     Path(f"{save_dir}/images").mkdir(parents=True, exist_ok=True)
     Path(f"{save_dir}/gt").mkdir(parents=True, exist_ok=True)
     Path(f"{save_dir}/pred").mkdir(parents=True, exist_ok=True)
 
-    # prepare
-    affine = np.diag(np.asarray([1, 1, 1, 0]))
+    # prepare. Arrays are (1, H, W, frames); when `spacing` (mm) is given, stamp it on the
+    # in-plane H/W axes so the reward dataset records the common voxel spacing. Default
+    # (None) keeps the legacy unit-spacing affine so the main RL pipeline is unaffected.
+    s = 1 if spacing is None else float(spacing)
+    affine = np.diag(np.asarray([1, s, s, 0]))
     hdr = nib.Nifti1Header()
 
     # save three files

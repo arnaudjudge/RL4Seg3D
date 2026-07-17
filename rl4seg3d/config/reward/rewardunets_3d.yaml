@@ -3,9 +3,20 @@ defaults:
 
 _target_: rl4seg3d.reward.reward_nets_3d.RewardUnets3D
 
+# Any number of named reward nets is supported: RewardUnets3D loads one net per entry and
+# fuses their maps with an elementwise minimum (a pixel is high-reward only where ALL nets
+# agree). Add/remove entries freely -- e.g. uncomment `apex` for a third active reward.
 state_dict_paths:
-  anatomical: null #<PATH_TO_ANATOMICAL>
-  landmarks: null #<PATH_TO_LM>
+  anatomical: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/first_anat_rewardnet.ckpt #<PATH_TO_ANATOMICAL>
+  landmarks: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/landmarks_long.ckpt #<PATH_TO_LM>
+  apex: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/apex_rewardnet.ckpt  # 3rd active reward
+#  anatomical: /home/local/USHERBROOKE/juda2901/dev/RL4Echo/checkpoints/rewardnet_5000best.ckpt  #/home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/first_anat_rewardnet.ckpt #<PATH_TO_ANATOMICAL>
+#  landmarks: /home/local/USHERBROOKE/juda2901/dev/RL4Echo/checkpoints/reward_net_3d_landmarks2-0.ckpt # /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/landmarks_long.ckpt #<PATH_TO_LM>
+
+# per-frame min-max renorm per net. Localized maps (landmarks/apex) should NOT be renormed
+# (renorm maps a good flat frame to 0); pass a dict for per-net control, e.g.:
+#   renorm: {anatomical: true, landmarks: false, apex: false}
+renorm: true
 
 temp_factor: 1 #4.5989 optimal factor for LM+ANAT calibration
 

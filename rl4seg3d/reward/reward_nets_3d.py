@@ -1,4 +1,5 @@
 from copy import deepcopy
+from functools import reduce
 from typing import Union, List, Optional
 from pathlib import Path
 
@@ -28,8 +29,18 @@ def _reward_net_forward(net, stack, cond):
 
 
 class RewardUnets3D(Reward):
-    def __init__(self, net, state_dict_paths, temp_factor=1):
+    def __init__(self, net, state_dict_paths, temp_factor=1, renorm=True):
+        """
+        Args:
+            renorm: whether to apply the per-frame min-max renorm to each reward map.
+                Appropriate for the dense anatomical map, but it maps a uniformly-good
+                (flat) frame to all-zero and amplifies noise on localized maps -- so turn
+                it OFF for the landmark/apex nets (their raw sigmoid is already the reward:
+                ~1 where good, dipping only at the error). Accepts a bool (all nets) or a
+                dict {net_name: bool} for per-net control (unlisted nets default to True).
+        """
         self.nets = {}
+        self.renorm = renorm
         for name, path in state_dict_paths.items():
             n = deepcopy(net)
             if path and Path(path).exists():
@@ -51,22 +62,32 @@ class RewardUnets3D(Reward):
             self.nets.update({name: n})
         self.temp_factor = temp_factor
 
+    def _should_renorm(self, name):
+        """Per-net renorm flag (dict) or a single bool applied to all nets."""
+        if isinstance(self.renorm, dict):
+            return bool(self.renorm.get(name, True))
+        return bool(self.renorm)
+
     @torch.no_grad()
     def __call__(self, pred, imgs, gt, cond=None):
         stack = torch.stack((imgs.squeeze(1), pred), dim=1)
         r = []
-        for net in self.get_nets():
+        for name, net in self.nets.items():
             out = _reward_net_forward(net, stack, cond)
             # assert not torch.isnan(o).any(), "NaNs in RewardNet out"
             t = self.temp_factor if len(r) < 1 else 1 # ONLY TEMPERATURE SCALE ANATOMICAL (0)
-            rew = torch.sigmoid(out / t).squeeze(1)
-            for i in range(rew.shape[0]):
-                for j in range(rew.shape[-1]):
-                    rew[i, ..., j] = rew[i, ..., j] - rew[i, ..., j].min()
-                    rew[i, ..., j] = rew[i, ..., j] / rew[i, ..., j].max()
+            rew = torch.sigmoid(out / t).squeeze(1)         # (B, H, W, D)
+            if self._should_renorm(name):
+                # per-frame (last axis) min-max renorm over the spatial dims. Clamp the
+                # denominator so a perfectly flat frame yields 0 instead of 0/0 = NaN.
+                mins = rew.amin(dim=(1, 2), keepdim=True)
+                maxs = rew.amax(dim=(1, 2), keepdim=True)
+                rew = (rew - mins) / (maxs - mins).clamp_min(1e-8)
             r += [rew]
         if len(r) > 1:
-            r = [torch.minimum(r[0], r[1])]
+            # fuse ALL reward maps (not just the first two): a pixel is high-reward only
+            # where every net agrees it's good.
+            r = [reduce(torch.minimum, r)]
         return r
 
     def get_nets(self):

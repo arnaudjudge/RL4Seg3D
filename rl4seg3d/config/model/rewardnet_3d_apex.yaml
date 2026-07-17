@@ -1,0 +1,20 @@
+defaults:
+  - net: conditioned_unet_film
+
+_target_: rl4seg3d.rewardnet.reward_unet_3d.Reward3DOptimizer
+
+save_model_path: ./apex_rewardnet.ckpt
+# FiLM view conditioning (a2c, a3c, a4c -> 3 views). Must match the datamodule's num_views.
+num_views: 3
+
+# Error-focused loss so the tiny apex region isn't drowned out by the correct background.
+loss:
+  _target_: rl4seg3d.rewardnet.apex_loss.ApexWeightedMSELoss
+  margin: 6
+  fg_weight: 1.0
+  bg_weight: 0.25
+
+net:
+  # reward net stacks (img, pred) -> 1-channel apex-error map
+  in_channels: 2
+  num_classes: 1

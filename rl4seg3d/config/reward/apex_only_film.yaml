@@ -1,0 +1,18 @@
+# Passive observer / standalone: apex reward net (FiLM, view-conditioned), apex errors only.
+defaults:
+  - /model/net@net: conditioned_unet_film
+
+_target_: rl4seg3d.reward.reward_nets_3d.RewardUnets3D
+
+state_dict_paths:
+  apex: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/apex_rewardnet.ckpt
+
+# apex error map is localized: keep the raw sigmoid (high everywhere, dipping at the apex
+# error) instead of per-frame min-max renorm, which would map a good (flat) frame to 0.
+renorm: false
+
+temp_factor: 1
+
+net:
+  in_channels: 2
+  num_classes: 1

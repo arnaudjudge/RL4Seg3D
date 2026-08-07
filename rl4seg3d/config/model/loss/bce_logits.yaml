@@ -1,0 +1,4 @@
+# Plain BCE on logits. The A/B counterpart to mse.yaml: identical data and schedule, but
+# the gradient no longer vanishes where the net confidently endorses a real error.
+_target_: rl4seg3d.rewardnet.reward_losses.BCEWithLogits
+error_weight: 1.0

@@ -1,5 +1,8 @@
 defaults:
   - net: conditioned_unet_film
+  # mse = historical behaviour (MSE on post-sigmoid output). A/B against the logit-space
+  # losses with `model/loss=bce_logits`; see rewardnet/reward_losses.py.
+  - loss: mse
 
 _target_: rl4seg3d.rewardnet.reward_unet_3d.Reward3DOptimizer
 

@@ -16,7 +16,8 @@ import torch.distributions as distributions
 
 
 class Reward3DOptimizer(LightningModule):
-    def __init__(self, net, loss=nn.MSELoss(), save_model_path=None, var_file=None, num_views=0, do_temp_scale=False, **kwargs):
+    def __init__(self, net, loss=nn.MSELoss(), save_model_path=None, var_file=None, num_views=0,
+                 do_temp_scale=False, loss_on_logits=None, **kwargs):
         super().__init__(**kwargs)
 
         self.net = net
@@ -26,8 +27,27 @@ class Reward3DOptimizer(LightningModule):
         self.var_file = var_file
 
         self.loss = loss
+        # Logit-space losses (see rewardnet.reward_losses) must see raw logits; the MSE
+        # baselines take post-sigmoid probabilities. Auto-detected from the loss so the two
+        # can never fall out of sync, with an explicit override for anything exotic.
+        if loss_on_logits is None:
+            loss_on_logits = bool(getattr(loss, "expects_logits",
+                                          isinstance(loss, nn.BCEWithLogitsLoss)))
+        self.loss_on_logits = loss_on_logits
+        print(f"[Reward3DOptimizer] loss={type(loss).__name__} on {'logits' if loss_on_logits else 'probabilities'}")
         self.save_model_path = save_model_path
         self.do_temp_scale = do_temp_scale
+
+    def _predict_and_loss(self, x, y, cond):
+        """Forward once; return (probabilities for logging/metrics, loss).
+
+        Applying MSE to the post-sigmoid output scales the logit gradient by p(1-p), which
+        vanishes precisely where the net confidently endorses a real error -- the case we
+        most need to learn from. Logit-space losses avoid that, hence the routing.
+        """
+        logits = self(x, cond=cond)
+        y_pred = torch.sigmoid(logits)
+        return y_pred, self.loss(logits if self.loss_on_logits else y_pred, y)
 
     def _get_cond(self, batch):
         """View conditioning tensor from batch's view_id, or None.
@@ -72,8 +92,7 @@ class Reward3DOptimizer(LightningModule):
             y = y.squeeze(0)
             cond = self._expand_cond(cond, x.shape[0])
 
-        y_pred = torch.sigmoid(self(x, cond=cond))
-        loss = self.loss(y_pred, y)
+        y_pred, loss = self._predict_and_loss(x, y, cond)
 
         logs = {
             'loss': loss,
@@ -90,8 +109,7 @@ class Reward3DOptimizer(LightningModule):
             y = y.squeeze(0)
             cond = self._expand_cond(cond, x.shape[0])
 
-        y_pred = torch.sigmoid(self(x, cond=cond))
-        loss = self.loss(y_pred, y)
+        y_pred, loss = self._predict_and_loss(x, y, cond)
 
         acc = accuracy(y_pred, x, y)
 
@@ -116,8 +134,7 @@ class Reward3DOptimizer(LightningModule):
             y = y.squeeze(0)
             cond = self._expand_cond(cond, x.shape[0])
 
-        y_pred = torch.sigmoid(self(x, cond=cond))
-        loss = self.loss(y_pred, y)
+        y_pred, loss = self._predict_and_loss(x, y, cond)
 
         acc = accuracy(y_pred, x, y)
 

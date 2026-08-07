@@ -17,8 +17,21 @@ import torch.distributions as distributions
 
 class Reward3DOptimizer(LightningModule):
     def __init__(self, net, loss=nn.MSELoss(), save_model_path=None, var_file=None, num_views=0,
-                 do_temp_scale=False, loss_on_logits=None, **kwargs):
+                 do_temp_scale=False, loss_on_logits=None,
+                 lr=1e-3, lr_factor=0.5, lr_patience=20, lr_min=1e-6, **kwargs):
         super().__init__(**kwargs)
+
+        # ReduceLROnPlateau counts *validation checks*, i.e. epochs, so these have to be
+        # retuned whenever epoch length changes (see trainer.limit_train_batches). Simulated
+        # on the val/loss trace of the 140k run resampled to 200 short epochs, torch's
+        # defaults (factor 0.1, patience 10) cascade the LR down to 1e-8 and leave the tail
+        # of training dead; factor 0.5 / patience 20 drops once late and lands at 2.5e-4 to
+        # 5e-4 depending on how noisy val/loss is. lr_min floors it so a noisy plateau can
+        # never zero out the LR entirely.
+        self.lr = lr
+        self.lr_factor = lr_factor
+        self.lr_patience = lr_patience
+        self.lr_min = lr_min
 
         self.net = net
         self.num_views = num_views
@@ -80,8 +93,11 @@ class Reward3DOptimizer(LightningModule):
         return _forward_with_optional_cond(self.net, x, cond)
 
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=1e-3)
-        sch = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, "min")
+        opt = torch.optim.Adam(self.parameters(), lr=self.lr)
+        sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, "min", factor=self.lr_factor, patience=self.lr_patience, min_lr=self.lr_min)
+        print(f"[Reward3DOptimizer] Adam lr={self.lr}, ReduceLROnPlateau("
+              f"factor={self.lr_factor}, patience={self.lr_patience}, min_lr={self.lr_min})")
         return {"optimizer": opt, "lr_scheduler": sch, "monitor": "val/loss"}
 
     def training_step(self, batch, *args, **kwargs) -> Dict:

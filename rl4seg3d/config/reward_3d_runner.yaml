@@ -51,10 +51,13 @@ trainer:
   # metric. Set 362 to reproduce the old budget exactly.
   limit_train_batches: 16000
 
-  # Validation is ~5% of the pool at batch_size=1 and runs every epoch, so it grows with the
-  # data too. val_dataloader has shuffle=False, so this keeps the SAME subset every epoch
-  # and val/loss stays comparable across epochs (do not shuffle val, or early stopping and
-  # the LR schedule start reacting to sampling noise).
-  limit_val_batches: 500
+  # Val is forward-only and cheap per sample, but it now runs once per ~6 min epoch instead of
+  # once per 43 min, so the full ~6.1k-sample split would cost ~2.5 h over 200 epochs. Capping
+  # at 2000 costs ~50 min instead. Don't cut it much further: shrinking val raises the
+  # inter-epoch val/loss noise that EarlyStopping and ReduceLROnPlateau key off (~4% on the
+  # full split, ~7% at 2000, ~15% at 500 -- and at 15% the LR reductions become spurious).
+  # val_dataloader has shuffle=False, so this is a fixed subset and val/loss stays comparable
+  # across epochs (though which 2000 samples it is shifts as the reward pool grows).
+  limit_val_batches: 2000
 
   #num_sanity_val_steps: 0 # skip sanity check (convenient for debugging directly in train step)

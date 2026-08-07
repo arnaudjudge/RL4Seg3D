@@ -10,6 +10,12 @@ save_model_path: ./reward_net_3d.ckpt
 # FiLM view conditioning (a2c, a3c, a4c -> 3 views). Must match the datamodule's num_views.
 num_views: 3
 
+# ReduceLROnPlateau counts epochs, so retune these if trainer.limit_train_batches changes.
+lr: 1e-3
+lr_factor: 0.5
+lr_patience: 20
+lr_min: 1e-6
+
 net:
   # reward net stacks (img, pred) -> 1-channel landmark map
   in_channels: 2

@@ -24,7 +24,7 @@ callbacks:
     _target_: lightning.pytorch.callbacks.EarlyStopping
     monitor: val/loss
     mode: min
-    patience: 8
+    patience: 50
     verbose: True
 
 run_predict: False
@@ -33,10 +33,28 @@ train: True
 
 trainer:
   _target_: lightning.pytorch.Trainer
-  max_epochs: 50
+  max_epochs: 200
   log_every_n_steps: 1
   accelerator: gpu
   precision: "bf16-mixed"
   accumulate_grad_batches: 16
   devices: 1
+
+  # Decouple cost from dataset size: an "epoch" becomes a fixed number of batches rather
+  # than a full pass, so adding reward data no longer lengthens training. train_dataloader
+  # shuffles, so each epoch draws a FRESH random subset -- the whole pool is still covered
+  # over the run, and old iterations keep anchoring the net instead of being dropped.
+  # Keep this a multiple of accumulate_grad_batches: 16000/16 = 1000 optimizer steps/epoch,
+  # so max_epochs=200 is a ~200k-step budget. For reference, the 140k-sample run
+  # (Reward3DOptimizer_test) took 362k steps / 36.2 h and reached val/loss 0.00102, versus
+  # ~0.0012 at 200k steps -- a difference that did not show up in any downstream reward
+  # metric. Set 362 to reproduce the old budget exactly.
+  limit_train_batches: 16000
+
+  # Validation is ~5% of the pool at batch_size=1 and runs every epoch, so it grows with the
+  # data too. val_dataloader has shuffle=False, so this keeps the SAME subset every epoch
+  # and val/loss stays comparable across epochs (do not shuffle val, or early stopping and
+  # the LR schedule start reacting to sampling noise).
+  limit_val_batches: 500
+
   #num_sanity_val_steps: 0 # skip sanity check (convenient for debugging directly in train step)

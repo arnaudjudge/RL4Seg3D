@@ -26,7 +26,8 @@ sup_loss_label_smoothing: 0.0
 #
 rl_num_epochs: 5
 rl_num_predict: 2500
-rl_overrides: []
+rl_overrides: []  # applied when composing RL_3d_runner.yaml (must be keys of that config)
+rl_launch_overrides: []  # applied on the runner.py command line, after +launcher=... (launcher-level keys)
 rl_reward_config_name: rewardunets_3d # temporal_rewardunets_3d
 
 #

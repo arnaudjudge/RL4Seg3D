@@ -1,0 +1,64 @@
+# @package _global_
+
+# Launcher for prediction sweeps on nibi, driving rl4seg3d/config/predict3d.yaml.
+#
+# One array task per shard: sweep `shard_id` over `num_shards` values and hydra-submitit turns
+# the sweep into a SLURM array. Same command shape for a one-case smoke test (num_shards=1) and
+# the full sweep, so the submission path is exercised by the test rather than bypassed.
+#
+#   python rl4seg3d/predict_3d.py --multirun +launcher=predict_nibi \
+#     shard_id=range(0,96) num_shards=96 \
+#     input_path=... output_path=... ckpt_path=... \
+#     case_list=/path/to/maple.csv \
+#     overwrite_existing=False save_as_gif=False save_rewards=True \
+#     run_time_min=120 hydra.launcher.array_parallelism=20
+#
+# Re-running the identical command fills in only what is missing.
+#
+# Built directly on submitit_slurm rather than on hydra/launcher/{alliancecan,narval}: those
+# carry a $SLURM_TMPDIR rsync of the legacy PNNU_DATA_PATH plus narval-specific core and memory
+# counts. Prediction reads `input_path` off the shared filesystem and stages nothing.
+
+defaults:
+  - override /hydra/launcher: submitit_slurm
+
+# Walltime per array task. Short tasks land in backfill windows that long ones cannot use, and
+# an interrupted task now costs a single case because re-runs resume.
+run_time_min: 60
+
+# Dataloader workers, on the top-level key predict_3d.py reads. Keep at cpus_per_task - 1 so the
+# main process is not competing with its own workers.
+num_workers: 3
+
+hydra:
+  # Keep each task's resolved config beside its logs; predict3d.yaml disables this for local runs.
+  output_subdir: .hydra
+  sweep:
+    dir: multirun/predict/${now:%Y-%m-%d_%H-%M-%S}
+    # hydra.job.num is the sweep index, which equals the shard id when shard_id is the only
+    # thing swept (the usage above).
+    subdir: shard_${hydra.job.num}
+  launcher:
+    timeout_min: ${oc.select:run_time_min,60}
+    nodes: 1
+    tasks_per_node: 1
+    gpus_per_node: 1
+
+    # CONFIRM THESE TWO AGAINST THE REAL NODES before the full sweep:
+    #   sinfo -o "%20N %8c %10m %25G %15P %12l"
+    # Requesting more than a node's cores-per-GPU or mem-per-GPU share means waiting for a node
+    # with leftovers, which is the most common self-inflicted queue delay. These are deliberately
+    # conservative: one case at a time, batch size 1.
+    cpus_per_task: 4
+    mem_gb: 32
+
+    # Set SLURM_ACCOUNT in .env (alongside PROJECT_ROOT) to avoid repeating --account.
+    account: ${oc.env:SLURM_ACCOUNT,null}
+
+    # No data staging: tasks read input_path directly off the shared filesystem.
+    setup:
+      - "module load httpproxy"
+
+    # Concurrent array tasks. Left at the submitit default; throttle on the command line for the
+    # full sweep so 96 tasks do not all hit the queue at once.
+    # array_parallelism: 20

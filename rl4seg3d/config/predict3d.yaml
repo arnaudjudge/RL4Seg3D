@@ -4,6 +4,9 @@ defaults:
   - model: ppo_3d
   - paths: default
   - extras: default
+  # FiLM view-conditioned actor/critic nets (checkpoint trained with view_embed)
+  - override /actor/actor/net@model.actor.actor.net: film
+  - override /actor/critic/net@model.actor.critic.net: film
   - override hydra/job_logging: custom
   - _self_
 
@@ -12,29 +15,67 @@ task_name: "predict"
 tags: ["predict"]
 
 # input folder containing data for inference
-input_path: ???
+input_path: /data/landmarks_dataset_234ch/img/
+
+file_filter_regex: .*
+
+# optional work list naming which cases to predict: either a text file (one case id, filename or
+# relative path per line; blank lines and '#' comments ignored) or a csv. Together with
+# shard_id/num_shards this replaces splitting a dataset into one file per job by hand.
+case_list: null
+
+# csv work lists only: column holding the case ids. Inferred from the usual names when null.
+case_list_column: null
+
+# csv work lists only: pandas query selecting rows before ids are read, e.g.
+# "expected_area <= 550000" to keep only the cases that fit a 20GB GPU (the same threshold as
+# datamodule/maple.yaml's max_image_area), or "expected_area > 550000" for the rest.
+case_list_query: null
+
+# split the resolved work list across `num_shards` processes and handle only `shard_id`'s share.
+# The split is round-robin over the sorted list, so cases of uneven size even out across shards.
+# On a cluster set shard_id from the array index, e.g. shard_id=$SLURM_ARRAY_TASK_ID.
+shard_id: 0
+num_shards: 1
+
+# optional path to a {case_identifier: view_str} JSON (e.g. "di-XXXX": "A4C") used to set
+# the FiLM view conditioning per case. Leave null to predict unconditioned.
+view_mapping: /data/landmarks_dataset_234ch/view_mapping.json
 
 # output folder to save predictions
-output_path: ???
+output_path: /data/landmarks_dataset_234ch/pred/random_base_smaller_shift
 
 # passing checkpoint path is necessary for prediction
-ckpt_path: ./data/checkpoints/rl4seg3d_slim.ckpt
+ckpt_path: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/full_ckpt_histo-film-long.ckpt
 
 # whether to use test time augmentation
-tta: True
+tta: False
 
 # whether to use test time optimization scheme: 'force' (always), 'on' (anatomical or temporal metrics fail) or 'off'
 # any other value will be considered 'off'
-tto: 'on'
+tto: 'off'
 
-# whether to overwrite existing predictions in the output folder
+# whether to overwrite existing predictions in the output folder. Set False to skip cases whose
+# outputs are all present already, which is what makes re-submitting an interrupted job cheap:
+# it only redoes what is missing. A case with some but not all of its outputs is always redone.
 overwrite_existing: True
 
 save_as_gif: True
 
+# per-case csv of anatomical/temporal validity and reward summaries (one row per case), written
+# incrementally as cases finish. One file per shard by construction: array tasks never share a
+# path, so there is no locking, no deadlock and no interleaved writes to one large csv. Rows are
+# appended, so a resumed shard adds only the cases it actually redoes. Set to null to disable.
+scores_csv: ${output_path}/scores_shard${shard_id}.csv
+
+# also write each case's per-net reward maps as one 4D `_merged_all_rewards.nii.gz`
+# (net axis first, original image grid) -- the layout the SynthEcho tracking
+# pipeline reads. Off by default: it roughly triples the output size.
+save_rewards: False
+
 common_spacing: [0.37, 0.37, 1]
 
-apply_eq_hist: True
+apply_eq_hist: False
 
 pin_memory: True
 
@@ -58,6 +99,7 @@ model:
   divergence_coeff: 0.01
   entropy_coeff: 0.1
   inference: True
+  inference_csv_path: ${scores_csv}
 
 trainer:
   _target_: lightning.pytorch.Trainer

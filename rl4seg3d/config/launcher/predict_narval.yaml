@@ -1,0 +1,71 @@
+# @package _global_
+
+# Launcher for bulk prediction sweeps on narval, driving rl4seg3d/config/predict3d.yaml.
+#
+# One array task per shard: sweep `shard_id` over `num_shards` values and submitit turns the
+# sweep into a SLURM array, so no hand-written sbatch script and no splitting the dataset into
+# per-job files.
+#
+#   python rl4seg3d/predict_3d.py --multirun +launcher=predict_narval \
+#     shard_id=range(0,96) num_shards=96 \
+#     input_path=... output_path=... ckpt_path=... \
+#     case_list=/path/to/maple.csv 'case_list_query="expected_area <= 550000"' \
+#     overwrite_existing=False save_as_gif=False save_rewards=True \
+#     run_time_min=120 hydra.launcher.array_parallelism=20
+#
+# The `case_list_query` above selects the cases that fit the smaller GPU; the cases it excludes
+# are the same command with the complementary query (`expected_area > 550000`) and a larger
+# gres/mem_gb. Quote it exactly as shown -- Hydra's override grammar rejects a bare `<=`.
+#
+# Re-running the identical command fills in whatever is missing rather than redoing the work:
+# `overwrite_existing=False` makes each task skip cases whose outputs are already complete, and
+# skipping happens before sharding so the leftovers spread over every task.
+
+# Tasks read `input_path` straight off the shared filesystem -- nothing is staged to the compute
+# node, matching how the rest of the project runs today. Keep it that way: the launcher configs
+# inherited from patchless-nnUnet still carry a $SLURM_TMPDIR copy step wired to the legacy
+# PNNU_DATA_PATH variable (rl4seg3d itself uses DATA_PATH), and it is explicitly overridden below.
+# Re-enabling any copy step would also mean copying per array task, which is the wrong shape for
+# a sweep that reads each case exactly once.
+
+defaults:
+  # Reuse narval's resource definition (submitit target, cpus_per_task, 1 GPU, mem_gb) but NOT
+  # the global `launcher/narval`, which is shaped for training runs and would bring:
+  #   * `datamodule.num_workers`, which predict3d.yaml has no datamodule node to receive -- it
+  #     would compose into a dead key while the real knob (top-level `num_workers`) kept its
+  #     local-workstation default, and
+  #   * `paths.data_dir` bound to PNNU_DATA_PATH, which nothing in a predict run reads and which
+  #     would make the sweep fail to compose unless that stale variable were set.
+  - override /hydra/launcher: narval
+
+# Walltime per array task. Prefer several short tasks over a few long ones: short jobs land in
+# backfill windows far more readily, and an interrupted one costs a single case now that re-runs
+# resume. Overridable as `run_time_min=...` (hydra/launcher/alliancecan.yaml reads it).
+run_time_min: 120
+
+# Dataloader workers, on the top-level key predict_3d.py actually reads. Keep at
+# hydra.launcher.cpus_per_task - 1 so the main process is not competing with its own workers;
+# oversubscribing here is a common cause of a GPU sitting idle behind the loader.
+num_workers: 11
+
+hydra:
+  # Keep each task's resolved config beside its logs. predict3d.yaml disables this to keep local
+  # runs tidy, but across ~100 tasks, reconstructing what one shard was handed is otherwise
+  # guesswork.
+  output_subdir: .hydra
+  sweep:
+    dir: multirun/predict/${now:%Y-%m-%d_%H-%M-%S}
+    # hydra.job.num is the sweep index, which is the shard id exactly when shard_id is the only
+    # thing swept (the usage above). Sweeping anything else alongside it makes the name a label
+    # rather than the shard id.
+    subdir: shard_${hydra.job.num}
+  launcher:
+    # Replaces the inherited training setup block, which rsyncs $PNNU_DATA_PATH into
+    # $SLURM_TMPDIR. Keep proxy access only: no data is staged to the compute node (see above),
+    # and dropping that step is also what lets this sweep compose without PNNU_DATA_PATH set.
+    setup:
+      - "module load httpproxy"
+
+    # MIG slice to request. Left unset because the exact gres string is site-specific -- put the
+    # one you already use for these jobs here (and raise mem_gb alongside it for the larger tier).
+    # gres: gpu:a100_3g.20gb:1

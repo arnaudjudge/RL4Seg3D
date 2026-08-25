@@ -27,6 +27,14 @@ case_list: null
 # csv work lists only: column holding the case ids. Inferred from the usual names when null.
 case_list_column: null
 
+# csv work lists only: str.format template over the csv columns giving each case's path
+# relative to input_path, e.g. "{dataset}/img/{relative_path}.nii.gz". When set, paths are built
+# straight from the csv and the input tree is never scanned -- discovery then costs one stat per
+# case actually wanted instead of a full traversal, which matters most because every array task
+# would otherwise repeat that traversal. Rows naming a file that is not on disk are skipped and
+# counted. Leave null to discover by scanning input_path.
+case_path_template: null
+
 # csv work lists only: column to prioritise cases by, so that `limit` keeps the cases worth
 # having rather than an arbitrary slice. e.g. IQ_expval to take the best image quality first.
 # Cases with no value in the column are placed FIRST (an unscored case is not a bad one).

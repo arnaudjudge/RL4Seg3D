@@ -1,5 +1,6 @@
 import os
 import json
+import string
 import time
 from pathlib import Path
 from typing import Tuple
@@ -81,8 +82,13 @@ def case_id_from_path(path):
     return Path(path).name.split('.')[0].removesuffix("_0000")
 
 
-def load_case_list(path, column=None, query=None, order_by=None, order_desc=True):
-    """Read a work list and return its case identifiers in priority order, or None if no path.
+def load_case_list(path, column=None, query=None, order_by=None, order_desc=True,
+                   path_template=None):
+    """Read a work list, returning (case_ids, relative_paths) in priority order.
+
+    Both are None when `path` is None. `relative_paths` is None unless `path_template` is given,
+    in which case it holds one path per case, built by formatting the template against that csv
+    row -- letting the dataset construct paths directly instead of walking the input tree.
 
     Accepts a text file (one entry per line, blank lines and '#' comments ignored) or a csv.
     Entries may be bare case ids, filenames or relative paths: all are reduced to a case id,
@@ -96,9 +102,12 @@ def load_case_list(path, column=None, query=None, order_by=None, order_desc=True
     the cases worth having: e.g. "IQ_expval" with `order_desc` to take the best image quality
     first. Cases with no value in that column are placed FIRST, on the grounds that an unscored
     case is not evidence of a bad one. Order is stable, so equal keys keep their csv order.
+
+    `path_template` is a str.format template over the csv columns, e.g.
+    "{dataset}/img/{relative_path}.nii.gz", resolved relative to `input_path`.
     """
     if not path:
-        return None
+        return None, None
 
     path = Path(path)
     if path.suffix.lower() == ".csv":
@@ -137,24 +146,51 @@ def load_case_list(path, column=None, query=None, order_by=None, order_desc=True
                      f"{int(key.isna().sum())} case(s) with no value placed first)")
 
         log.info(f"Reading case ids from column {column!r} of {path}")
-        entries = df[column].dropna().astype(str).tolist()
+        sub = df[df[column].notna()]
+        entries = sub[column].astype(str).tolist()
+
+        rel_paths = None
+        if path_template:
+            missing_cols = sorted(
+                f for _, f, _, _ in string.Formatter().parse(path_template)
+                if f and f not in sub.columns
+            )
+            if missing_cols:
+                raise ValueError(
+                    f"case_path_template references column(s) {missing_cols} not in {path} "
+                    f"(available: {list(sub.columns)})"
+                )
+            rel_paths = [path_template.format(**row)
+                         for row in sub.to_dict(orient="records")]
+            log.info(f"Building paths from {path_template!r} "
+                     f"(no input tree scan); e.g. {rel_paths[0] if rel_paths else '-'}")
+        return _dedupe_work_list(entries, rel_paths, path)
     else:
         for name, val in (("case_list_query", query), ("case_order_by", order_by)):
             if val:
                 log.warning(f"{name} is ignored for non-csv case_list {path}")
+        if path_template:
+            log.warning(f"case_path_template is ignored for non-csv case_list {path}")
         with open(path) as f:
             entries = [line.strip() for line in f]
         entries = [e for e in entries if e and not e.startswith("#")]
 
-    # de-duplicate while keeping first occurrence, so the priority order survives
-    case_ids, seen = [], set()
-    for e in entries:
+    return _dedupe_work_list(entries, None, path)
+
+
+def _dedupe_work_list(entries, rel_paths, path):
+    """Reduce entries to case ids, keeping first occurrence so priority order survives."""
+    case_ids, kept_paths, seen = [], [] if rel_paths is not None else None, set()
+    for i, e in enumerate(entries):
         cid = case_id_from_path(e)
-        if cid not in seen:
-            seen.add(cid)
-            case_ids.append(cid)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        case_ids.append(cid)
+        if kept_paths is not None:
+            kept_paths.append(rel_paths[i])
     log.info(f"Work list {path} names {len(case_ids)} unique case(s)")
-    return case_ids
+    return case_ids, kept_paths
 
 
 def load_image(input_path):
@@ -258,7 +294,8 @@ class LazyEchoDataset(Dataset):
     """Loads and preprocesses files on-demand instead of all at once."""
 
     def __init__(self, input_path, transform=None, apply_eq_hist=False, file_match_regex=".*",
-                 view_mapping=None, case_ids=None, use_case_list_order=False, limit=None,
+                 view_mapping=None, case_ids=None, case_paths=None,
+                 use_case_list_order=False, limit=None,
                  shard_id=0, num_shards=1,
                  skip_existing=False, output_path=None, expect_reward_maps=False):
         if num_shards < 1:
@@ -273,6 +310,7 @@ class LazyEchoDataset(Dataset):
         self.case_ids = set(case_ids) if case_ids is not None else None
         self.case_rank = ({cid: i for i, cid in enumerate(case_ids)}
                           if case_ids is not None and use_case_list_order else None)
+        self.case_paths = case_paths
         self.limit = limit
         self.shard_id = shard_id
         self.num_shards = num_shards
@@ -300,8 +338,51 @@ class LazyEchoDataset(Dataset):
             needed.append(f"{case_id}_merged_all_rewards.nii.gz")
         return all(name in self.existing_outputs for name in needed)
 
+    def _collect_from_work_list(self, input_path, file_match_regex):
+        """Build paths straight from the work list, without touching the input tree.
+
+        Cases are visited in the work list's priority order and stat()ed one at a time, so a
+        run capped by `limit` costs that many stat calls rather than a full traversal -- the
+        walk's cost scales with the dataset, this scales with what was actually asked for.
+
+        Rows whose file is absent are skipped and counted: a csv naming cases that are not on
+        disk is a known condition of this dataset, not an error.
+        """
+        kept, missing, n_regex_skipped = [], 0, 0
+        for rel in self.case_paths:
+            if self.limit is not None and len(kept) >= self.limit:
+                break
+            f = input_path / rel
+            if not re.search(file_match_regex, f.as_posix()):
+                n_regex_skipped += 1
+                continue
+            if not f.is_file():
+                missing += 1
+                continue
+            kept.append(f)
+
+        log.info(
+            f"Work list -> {len(kept)} file(s) resolved from {len(self.case_paths)} row(s) "
+            f"({missing} with no file on disk"
+            + (f", {n_regex_skipped} filtered by file_filter_regex" if n_regex_skipped else "")
+            + (f", stopped at limit={self.limit}" if self.limit is not None else "") + ")"
+        )
+        return kept
+
     def _collect_files(self, input_path, file_match_regex):
         input_path = Path(input_path)
+        if self.case_paths is not None and input_path.is_dir():
+            files = self._collect_from_work_list(input_path, file_match_regex)
+            # `limit` is already applied above; skipping still happens before sharding so a
+            # re-run spreads the remaining cases over every shard.
+            if self.skip_existing:
+                files = [f for f in files if not self._outputs_exist(case_id_from_path(f))]
+            n_todo = len(files)
+            files = files[self.shard_id::self.num_shards]
+            log.info(f"{n_todo} not yet predicted -> {len(files)} in shard "
+                     f"{self.shard_id}/{self.num_shards}")
+            return files
+
         if input_path.is_file() and input_path.suffix in (".dcm", ".nii") or \
                 "".join(input_path.suffixes[-2:]) == ".nii.gz":
             files = [input_path]
@@ -510,12 +591,13 @@ class RL4Seg3DPredictor:
         # numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist, cfg.file_filter_regex)
         view_mapping = load_view_mapping(cfg.get("view_mapping", None))
         case_order_by = cfg.get("case_order_by", None)
-        case_ids = load_case_list(
+        case_ids, case_paths = load_case_list(
             cfg.get("case_list", None),
             column=cfg.get("case_list_column", None),
             query=cfg.get("case_list_query", None),
             order_by=case_order_by,
             order_desc=cfg.get("case_order_desc", True),
+            path_template=cfg.get("case_path_template", None),
         )
         dataset = LazyEchoDataset(
             input_path=cfg.input_path,
@@ -524,6 +606,7 @@ class RL4Seg3DPredictor:
             file_match_regex=cfg.file_filter_regex,
             view_mapping=view_mapping,
             case_ids=case_ids,
+            case_paths=case_paths,
             use_case_list_order=bool(case_order_by),
             limit=cfg.get("limit", None),
             shard_id=cfg.get("shard_id", 0),

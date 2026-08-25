@@ -27,6 +27,19 @@ case_list: null
 # csv work lists only: column holding the case ids. Inferred from the usual names when null.
 case_list_column: null
 
+# csv work lists only: column to prioritise cases by, so that `limit` keeps the cases worth
+# having rather than an arbitrary slice. e.g. IQ_expval to take the best image quality first.
+# Cases with no value in the column are placed FIRST (an unscored case is not a bad one).
+case_order_by: null
+# true = highest value first. CONFIRM which end of IQ_expval is "good" for this dataset before
+# relying on it: the column runs ~1.5-3.0 alongside IQ_class 1/2/3, and nothing in the code
+# interprets it, so the direction is a convention of the labelling, not of the data.
+case_order_desc: True
+
+# keep only the first N cases of the (ordered) work list; null = all. Applied before the
+# resume check, so re-running finishes the same N instead of moving on to the next N.
+limit: null
+
 # csv work lists only: pandas query selecting rows before ids are read, e.g.
 # "expected_area <= 550000" to keep only the cases that fit a 20GB GPU (the same threshold as
 # datamodule/maple.yaml's max_image_area), or "expected_area > 550000" for the rest.

@@ -42,7 +42,19 @@ hydra:
     timeout_min: ${oc.select:run_time_min,60}
     nodes: 1
     tasks_per_node: 1
-    gpus_per_node: 1
+
+    # nibi refuses a GPU request with no type ("There is no 1 GPU-type on the system"), so
+    # gpus_per_node is unusable here: it is typed Optional[int] and renders --gpus-per-node=1,
+    # where slurm reads the "1" as a type name. `gres` is Optional[str] and renders
+    # --gres=gpu:<type>:<count>, which is the form nibi accepts.
+    #
+    # Available types: h100 (full 80GB), the MIG slices
+    # nvidia_h100_80gb_hbm3_{1g.10gb,2g.20gb,3g.40gb,4g.40gb}, plus mi300a, a100, a5000, t4.
+    #
+    # Default is the 20GB MIG slice: cheapest to schedule and enough for most cases. For the
+    # cases it cannot fit, re-run with the complementary case_list_query and a bigger slice:
+    #   hydra.launcher.gres=gpu:nvidia_h100_80gb_hbm3_3g.40gb:1
+    gres: gpu:nvidia_h100_80gb_hbm3_2g.20gb:1
 
     # CONFIRM THESE TWO AGAINST THE REAL NODES before the full sweep:
     #   sinfo -o "%20N %8c %10m %25G %15P %12l"

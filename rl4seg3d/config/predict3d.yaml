@@ -99,7 +99,11 @@ hydra:
   run:
     dir: .
   job_logging:
-    disable_existing_loggers: true  # disables logging to hydra.log
+    # Must stay false: true disables every logger that already exists when hydra configures
+    # logging, which is all of them (module-level `log = get_pylogger(__name__)`), so the
+    # script's own progress output vanishes. It is not what suppresses hydra.log -- that is
+    # `output_subdir: null` above.
+    disable_existing_loggers: false
   hydra_logging:
     disable_existing_loggers: true  # disables logging to hydra.log
 

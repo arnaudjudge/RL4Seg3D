@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 from typing import Tuple
 import re
@@ -305,9 +306,18 @@ class LazyEchoDataset(Dataset):
                 "".join(input_path.suffixes[-2:]) == ".nii.gz":
             files = [input_path]
         elif input_path.is_dir():
-            files = (list(input_path.rglob('*.dcm')) +
-                     list(input_path.rglob("*.nii")) +
-                     list(input_path.rglob("*.nii.gz")))
+            # One walk, not one rglob per extension: on a parallel filesystem with tens of
+            # thousands of files this is the longest step before anything is logged, so it is
+            # announced first and traverses the tree once instead of three times.
+            log.info(f"Scanning {input_path} for .dcm/.nii/.nii.gz files "
+                     f"(slow on first run over a large tree)...")
+            start = time.time()
+            files = []
+            for dirpath, _, filenames in os.walk(input_path):
+                d = Path(dirpath)
+                files += [d / fn for fn in filenames
+                          if fn.endswith((".dcm", ".nii", ".nii.gz"))]
+            log.info(f"Scan found {len(files)} file(s) in {time.time() - start:.1f}s")
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 

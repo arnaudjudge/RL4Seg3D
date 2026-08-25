@@ -31,13 +31,44 @@ log = utils.get_pylogger(__name__)
 VIEW_MAP = {"a2c": 0, "a3c": 1, "a4c": 2}
 
 
+# csv columns searched, in order, when a view mapping is read from a csv
+_VIEW_ID_COLUMNS = ("dicom_uuid", "case_identifier", "case_id")
+_VIEW_COLUMNS = ("view", "view_str")
+
+
 def load_view_mapping(path):
-    """Load a {case_identifier: view_str} JSON mapping, or return {} if path is None."""
+    """Load a {case_identifier: view_str} mapping, or return {} if path is None.
+
+    Accepts a JSON object, or a csv carrying the same information in two columns (the dataset
+    csv already does, so no separate file has to be generated and kept in sync with it).
+    """
     if not path:
         return {}
-    with open(path) as f:
-        mapping = json.load(f)
-    return {str(k): str(v) for k, v in mapping.items()}
+
+    path = Path(path)
+    if path.suffix.lower() != ".csv":
+        with open(path) as f:
+            mapping = json.load(f)
+        return {str(k): str(v) for k, v in mapping.items()}
+
+    df = pd.read_csv(path, low_memory=False)
+
+    def pick(candidates, kind):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        raise ValueError(
+            f"No {kind} column in {path}; looked for {list(candidates)}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    id_col, view_col = pick(_VIEW_ID_COLUMNS, "case id"), pick(_VIEW_COLUMNS, "view")
+    # df[view_col] rather than df.view: attribute access resolves to Series.view
+    sub = df[[id_col, view_col]].dropna()
+    mapping = dict(zip(sub[id_col].astype(str), sub[view_col].astype(str).str.lower()))
+    log.info(f"Read {len(mapping)} view(s) from {path} "
+             f"(columns {id_col!r} -> {view_col!r})")
+    return mapping
 
 
 def case_id_from_path(path):
@@ -49,16 +80,21 @@ def case_id_from_path(path):
     return Path(path).name.split('.')[0].removesuffix("_0000")
 
 
-def load_case_list(path, column=None, query=None):
-    """Read a work list and return the set of case identifiers it names, or None if no path.
+def load_case_list(path, column=None, query=None, order_by=None, order_desc=True):
+    """Read a work list and return its case identifiers in priority order, or None if no path.
 
     Accepts a text file (one entry per line, blank lines and '#' comments ignored) or a csv.
     Entries may be bare case ids, filenames or relative paths: all are reduced to a case id,
     so the same list works whatever produced it.
 
-    `column` and `query` apply to csv input only. `query` is a pandas expression selecting
-    rows before ids are read -- e.g. "expected_area <= 550000" to keep only the cases that
-    fit a smaller GPU -- and `column` names the id column (inferred when left None).
+    `column`, `query` and `order_by` apply to csv input only. `query` is a pandas expression
+    selecting rows before ids are read -- e.g. "expected_area <= 550000" to keep only the cases
+    that fit a smaller GPU -- and `column` names the id column (inferred when left None).
+
+    `order_by` names a column to prioritise by, so that truncating the run with `limit` keeps
+    the cases worth having: e.g. "IQ_expval" with `order_desc` to take the best image quality
+    first. Cases with no value in that column are placed FIRST, on the grounds that an unscored
+    case is not evidence of a bad one. Order is stable, so equal keys keep their csv order.
     """
     if not path:
         return None
@@ -84,16 +120,38 @@ def load_case_list(path, column=None, query=None):
             raise ValueError(
                 f"case_list_column {column!r} is not in {path} (available: {list(df.columns)})"
             )
+        if order_by:
+            if order_by not in df.columns:
+                raise ValueError(
+                    f"case_order_by {order_by!r} is not in {path} "
+                    f"(available: {list(df.columns)})"
+                )
+            key = pd.to_numeric(df[order_by], errors="coerce")
+            # missing values first (ascending=False on the bool), then by key; mergesort keeps
+            # equal keys in csv order so the sequence is reproducible across processes
+            df = df.assign(_missing=key.isna(), _key=key).sort_values(
+                ["_missing", "_key"], ascending=[False, not order_desc], kind="mergesort")
+            log.info(f"Ordered {path.name} by {order_by!r} "
+                     f"({'highest' if order_desc else 'lowest'} first, "
+                     f"{int(key.isna().sum())} case(s) with no value placed first)")
+
         log.info(f"Reading case ids from column {column!r} of {path}")
         entries = df[column].dropna().astype(str).tolist()
     else:
-        if query:
-            log.warning(f"case_list_query is ignored for non-csv case_list {path}")
+        for name, val in (("case_list_query", query), ("case_order_by", order_by)):
+            if val:
+                log.warning(f"{name} is ignored for non-csv case_list {path}")
         with open(path) as f:
             entries = [line.strip() for line in f]
         entries = [e for e in entries if e and not e.startswith("#")]
 
-    case_ids = {case_id_from_path(e) for e in entries}
+    # de-duplicate while keeping first occurrence, so the priority order survives
+    case_ids, seen = [], set()
+    for e in entries:
+        cid = case_id_from_path(e)
+        if cid not in seen:
+            seen.add(cid)
+            case_ids.append(cid)
     log.info(f"Work list {path} names {len(case_ids)} unique case(s)")
     return case_ids
 
@@ -199,7 +257,8 @@ class LazyEchoDataset(Dataset):
     """Loads and preprocesses files on-demand instead of all at once."""
 
     def __init__(self, input_path, transform=None, apply_eq_hist=False, file_match_regex=".*",
-                 view_mapping=None, case_ids=None, shard_id=0, num_shards=1,
+                 view_mapping=None, case_ids=None, use_case_list_order=False, limit=None,
+                 shard_id=0, num_shards=1,
                  skip_existing=False, output_path=None, expect_reward_maps=False):
         if num_shards < 1:
             raise ValueError(f"num_shards must be >= 1, got {num_shards}")
@@ -209,7 +268,11 @@ class LazyEchoDataset(Dataset):
         self.transform = transform
         self.apply_eq_hist = apply_eq_hist
         self.view_mapping = view_mapping or {}
-        self.case_ids = case_ids
+        # membership as a set; rank only when the work list carries a meaningful order
+        self.case_ids = set(case_ids) if case_ids is not None else None
+        self.case_rank = ({cid: i for i, cid in enumerate(case_ids)}
+                          if case_ids is not None and use_case_list_order else None)
+        self.limit = limit
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.skip_existing = skip_existing
@@ -261,6 +324,17 @@ class LazyEchoDataset(Dataset):
             files = [f for f in files if case_id_from_path(f) in self.case_ids]
         n_listed = len(files)
 
+        # Adopt the work list's priority order, so `limit` truncates to the cases worth having
+        # rather than to an arbitrary slice of the filesystem ordering.
+        if self.case_rank is not None:
+            files = sorted(files, key=lambda f: self.case_rank[case_id_from_path(f)])
+
+        # `limit` applies BEFORE skip_existing so the truncated set is stable: a resumed run
+        # finishes the same top-N rather than moving on to the next N.
+        if self.limit is not None:
+            files = files[:self.limit]
+        n_limited = len(files)
+
         # Skipping happens before sharding so that re-running to fill holes spreads the
         # remaining cases over every shard, instead of leaving most jobs with nothing to do
         # while a few carry all the leftovers.
@@ -272,7 +346,8 @@ class LazyEchoDataset(Dataset):
 
         log.info(
             f"Work list: {n_found} file(s) found -> {n_regex} after file_filter_regex "
-            f"-> {n_listed} after case_list -> {n_todo} not yet predicted "
+            f"-> {n_listed} after case_list -> {n_limited} after limit "
+            f"-> {n_todo} not yet predicted "
             f"-> {len(files)} in shard {self.shard_id}/{self.num_shards}"
         )
         if self.case_ids is not None and n_listed < len(self.case_ids):
@@ -424,10 +499,13 @@ class RL4Seg3DPredictor:
 
         # numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist, cfg.file_filter_regex)
         view_mapping = load_view_mapping(cfg.get("view_mapping", None))
+        case_order_by = cfg.get("case_order_by", None)
         case_ids = load_case_list(
             cfg.get("case_list", None),
             column=cfg.get("case_list_column", None),
             query=cfg.get("case_list_query", None),
+            order_by=case_order_by,
+            order_desc=cfg.get("case_order_desc", True),
         )
         dataset = LazyEchoDataset(
             input_path=cfg.input_path,
@@ -436,6 +514,8 @@ class RL4Seg3DPredictor:
             file_match_regex=cfg.file_filter_regex,
             view_mapping=view_mapping,
             case_ids=case_ids,
+            use_case_list_order=bool(case_order_by),
+            limit=cfg.get("limit", None),
             shard_id=cfg.get("shard_id", 0),
             num_shards=cfg.get("num_shards", 1),
             # `overwrite_existing` was declared in the config but never read by anything. It now

@@ -1,4 +1,5 @@
 import copy
+import functools
 import os
 import random
 import time
@@ -25,13 +26,13 @@ from patchless_nnunet.utils.inferers import SlidingWindowInferer
 from patchless_nnunet.utils.softmax import softmax_helper
 from rl4seg3d.utils.Metrics import accuracy, dice_score
 from rl4seg3d.utils.correctors import AEMorphoCorrector
-from rl4seg3d.utils.file_utils import save_to_reward_dataset
+from rl4seg3d.utils.file_utils import append_csv_row, reward_stats, save_reward_stack, save_to_reward_dataset
 from rl4seg3d.utils.logging_helper import log_sequence, log_video
 from rl4seg3d.utils.tensor_utils import convert_to_numpy
 from rl4seg3d.utils.test_metrics import full_test_metrics
 from rl4seg3d.utils.Metrics import is_anatomically_valid
 from rl4seg3d.utils.temporal_metrics import check_temporal_validity
-from rl4seg3d.utils.viz_utils import save_to_gif
+from rl4seg3d.utils.viz_utils import save_reward_gif
 from vital.metrics.camus.anatomical.utils import check_segmentation_validity
 
 
@@ -54,14 +55,19 @@ class RLmodule3D(LightningModule):
                  save_csv_after_predict=None,
                  val_batch_size=4,
                  tta=True,
-                 tto='off',
+                 tto='false',
                  temp_files_path='.',
                  inference=False,
+                 inference_csv_path=None,
                  num_views: int = 0,
+                 passive_rewards=None,
+                 passive_plot: bool = False,
+                 passive_log_images: bool = False,
+                 passive_log_images_every_n: int = 25,
                  *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
-        self.save_hyperparameters(logger=False, ignore=["actor", "reward", "corrector"])
+        self.save_hyperparameters(logger=False, ignore=["actor", "reward", "corrector", "passive_rewards"])
 
         self.actor = actor
         self.reward_func = reward
@@ -74,6 +80,22 @@ class RLmodule3D(LightningModule):
             elif isinstance(self.reward_func.nets, dict):
                 for i, n in enumerate(self.reward_func.nets.values()):
                     self.register_module(f'rewardnet_{i}', n)
+
+        # Passive "observer" reward nets: scored on the SAME rollout actions each step and
+        # logged, but NOT used for the loss. Used to A/B two reward nets on the identical
+        # (evolving-policy) rollout distribution, confound-free. Register their nets so
+        # Lightning moves them to the right device with the module.
+        self.passive_rewards = passive_rewards or {}
+        for name, rf in self.passive_rewards.items():
+            nets = rf.nets.values() if isinstance(getattr(rf, 'nets', None), dict) \
+                else getattr(rf, 'nets', [])
+            for i, n in enumerate(nets):
+                self.register_module(f'passive_{name}_{i}', n)
+        # naive step-by-step plot of the three reward maps (blocking plt.show each step)
+        self.passive_plot = passive_plot
+        # log the passive reward MAPS as images to the logger (Comet) every N steps
+        self.passive_log_images = passive_log_images
+        self.passive_log_images_every_n = max(int(passive_log_images_every_n), 1)
 
         self.pred_corrector = corrector
         if isinstance(self.pred_corrector, AEMorphoCorrector):
@@ -116,7 +138,7 @@ class RLmodule3D(LightningModule):
         net = self._policy_net()
         if net is not None and hasattr(net, 'view_embed'):
             return view_id
-        return F.one_hot(view_id, num_classes=self.hparams.num_views).float()
+        return view_id #F.one_hot(view_id, num_classes=self.hparams.num_views).float()
 
     @torch.no_grad()  # no grad since tensors are reused in PPO's for loop
     def rollout(self, imgs: torch.tensor, gt: torch.tensor, use_gt: torch.tensor = None,
@@ -153,6 +175,99 @@ class RLmodule3D(LightningModule):
         if cond.dim() == 1:
             return cond.expand(batch_size)
         return cond.expand(batch_size, -1)
+
+    @torch.no_grad()
+    def log_passive_rewards(self, actions, imgs, gt, cond, active_rewards, batch):
+        """Score `actions` with each passive observer reward net and log per-step means.
+
+        Non-invasive: does not affect the training loss. Enables a confound-free A/B of
+        reward nets on the actual rollout distribution. Also logs the active (training)
+        reward and the view id so noise can be stratified by view offline.
+        """
+        if not self.passive_rewards:
+            return
+
+        def _mean(rew_list):
+            return torch.mean(torch.stack([r.float().mean() for r in rew_list]))
+
+        values, maps = {}, {}
+        for name, rf in self.passive_rewards.items():
+            for n in rf.get_nets():
+                n.eval()
+            r = rf(actions, imgs, gt, cond=cond)
+            values[name] = _mean(r)
+            maps[name] = r[0]           # (B, H, W, D)
+        values['active_combined'] = _mean(active_rewards)
+        maps['active_combined'] = active_rewards[0]
+        for name, val in values.items():
+            self.log(f'train/passive/{name}', val,
+                     on_step=True, on_epoch=False, prog_bar=False, batch_size=1)
+        vid = batch.get('view_as_id') if isinstance(batch, dict) else None
+        if vid is not None:
+            self.log('train/passive/view_id', vid.float().view(-1)[0],
+                     on_step=True, on_epoch=False, prog_bar=False, batch_size=1)
+
+        if self.passive_plot:
+            self._show_passive_plot(maps, actions)
+        if self.passive_log_images and self.trainer.global_rank == 0 \
+                and (self.global_step % self.passive_log_images_every_n == 0):
+            self._log_passive_maps(maps, actions)
+
+    def _build_passive_fig(self, maps, actions):
+        """Build a figure: segmentation + each passive/active reward MAP at a random frame.
+
+        Returns (fig, frame_index). Panels share the same time index for comparability.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        D = next(iter(maps.values())).shape[-1]
+        j = int(np.random.randint(D))
+        seg = actions[0, ..., j].detach().float().cpu().numpy()
+
+        panels = list(maps.items())
+        fig = plt.figure('reward maps', figsize=(4 * (len(panels) + 1), 4))
+        fig.clf()
+        axes = fig.subplots(1, len(panels) + 1)
+        axes[0].imshow(seg.T, origin='lower', cmap='gray')
+        axes[0].set_title(f'segmentation (t={j})')
+        axes[0].axis('off')
+        for ax, (name, m) in zip(axes[1:], panels):
+            img = m[0, ..., j].detach().float().cpu().numpy()
+            im = ax.imshow(img.T, origin='lower', cmap='viridis', vmin=0, vmax=1)
+            ax.set_title(f'{name}\nmean={img.mean():.3f}')
+            ax.axis('off')
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        return fig, j
+
+    def _show_passive_plot(self, maps, actions):
+        """Naive blocking plot of the reward MAPS at a random time index.
+
+        Pops up a plt.show() window each step; close it to advance. Wrapped so a missing
+        display never breaks training.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            fig, _ = self._build_passive_fig(maps, actions)
+            fig.suptitle('passive reward maps (close window to continue)')
+            plt.show()
+        except Exception as e:
+            print(f"[passive_plot disabled: {e}]")
+            self.passive_plot = False
+
+    def _log_passive_maps(self, maps, actions):
+        """Log the passive/active reward MAPS as an image to the logger (Comet)."""
+        try:
+            import matplotlib.pyplot as plt
+            from lightning.pytorch.loggers import CometLogger
+            fig, j = self._build_passive_fig(maps, actions)
+            if isinstance(self.logger, CometLogger):
+                self.logger.experiment.log_figure(
+                    f"passive_reward_maps_t{j}", fig, step=self.global_step)
+            plt.close(fig)
+        except Exception as e:
+            print(f"[passive image logging disabled: {e}]")
+            self.passive_log_images = False
 
     def training_step(self, batch: dict[str, Tensor], nb_batch):
         """
@@ -330,7 +445,8 @@ class RLmodule3D(LightningModule):
                                                                           cond=self._current_cond), dim=0)
         prev_rewards_mean = torch.mean(prev_rewards, dim=0)
 
-        logs = full_test_metrics(y_pred_np_as_batch, b_gt_np_as_batch, voxel_spacing, self.device)
+        #logs = full_test_metrics(y_pred_np_as_batch, b_gt_np_as_batch, voxel_spacing, self.device)
+        logs = {'loss': 0}
         logs.update({"test/reward": torch.mean(prev_rewards_mean.type(torch.float))})
 
         if self.hparams.vae_on_test:
@@ -366,7 +482,7 @@ class RLmodule3D(LightningModule):
         _, _, _, _, v, _ = self.actor.evaluate(b_img[..., :4], prev_actions[..., :4],
                                                 cond=self._expand_cond(self._current_cond, b_img.shape[0]))
 
-        if self.trainer.global_rank == 0 and batch_idx % 1 == 0:
+        if self.trainer.global_rank == 0 and batch_idx % 1 == 123:
             log_video(self.logger, img=b_gt, background=b_img.squeeze(0), title='test_GroundTruth', number=batch_idx,
                          epoch=self.current_epoch)
             log_video(self.logger, img=prev_actions, background=b_img.squeeze(0), title='test_Prediction',
@@ -391,7 +507,7 @@ class RLmodule3D(LightningModule):
             fname = meta_dict.get("case_identifier")[0]
             spacing = meta_dict.get("original_spacing").cpu().detach().numpy()[0]
             resampled_affine = meta_dict.get("resampled_affine").cpu().detach().numpy()[0]
-            save_dir = os.path.join(self.trainer.default_root_dir, f"testing_raw_LM+ANAT_TTO_AVTV_NEW/{self.trainer.datamodule.get_approx_gt_subpath(fname).rsplit('/', 1)[0]}/")
+            save_dir = os.path.join(self.trainer.default_root_dir, f"testing_raw_cheatedmanyepochs/{self.trainer.datamodule.get_approx_gt_subpath(fname).rsplit('/', 1)[0]}/")
 
             final_preds = np.expand_dims(prev_actions, 0)
             transform = tio.Resample(spacing)
@@ -835,9 +951,15 @@ class RLmodule3D(LightningModule):
 
         # get reward maps
         rew = self.reward_func.predict_full_sequence(preds, img, None, cond=self._current_cond)
-        merged = torch.minimum(rew[0], rew[1]) if len(rew) > 1 else rew[0]
+        # fuse ALL nets, not just the first two (matches RewardUnets3D.__call__): a pixel is
+        # high-reward only where every net agrees.
+        merged = functools.reduce(torch.minimum, rew) if len(rew) > 1 else rew[0]
 
         preds = preds.cpu().detach().numpy()
+        # # TEMP: perturb the segmentation base off the mitral valve for reward-net dataset
+        # # generation (only touches the segmentation) — DELETE AFTER.
+        # preds[0] = perturb_segmentation_base(preds[0].transpose(2, 0, 1)).transpose(1, 2, 0)
+        # y_pred_np_as_batch = preds[0].transpose((2, 0, 1))
         merged = merged.cpu().detach().numpy()
         rew = [r.cpu().detach().numpy() for r in rew]
 
@@ -856,19 +978,68 @@ class RLmodule3D(LightningModule):
 
         self.save_mask(croporpad(transform(tio.LabelMap(tensor=preds, affine=resampled_affine))).numpy()[0],
                        fname, spacing, save_dir)
-        self.save_mask(croporpad(transform(tio.ScalarImage(tensor=merged, affine=resampled_affine))).numpy()[0],
-                       fname + "_merged_reward", spacing, save_dir, type=float)
-        [self.save_mask(croporpad(transform(tio.ScalarImage(tensor=rew[i], affine=resampled_affine))).numpy()[0],
-                       fname + f"_{i}_reward", spacing, save_dir, type=float) for i in range(len(rew))]
+
+        if properties_dict.get("save_rewards", None):
+            # Resampled back onto the original image grid so the maps line up with the
+            # saved mask. Net order follows cfg.model.reward.state_dict_paths; format and
+            # rationale live in save_reward_stack.
+            reward_path = os.path.join(save_dir, f"{fname}_merged_all_rewards.nii.gz")
+            print(f"Saving reward maps ({list(getattr(self.reward_func, 'nets', {}).keys())}) "
+                  f"for {fname}... in {save_dir}")
+            save_reward_stack(
+                [croporpad(transform(tio.ScalarImage(tensor=r, affine=resampled_affine))).numpy()[0]
+                 for r in rew],
+                affine, reward_path,
+            )
 
         save_gif = properties_dict.get("save_to_gif", None)
         if save_gif:
             gif_path = os.path.join(save_dir, str(fname) + ".gif")
             print(f"Saving gif to {gif_path}")
             img_b = img.cpu().numpy().squeeze(0).squeeze(0).transpose((2, 0, 1))
-            save_to_gif(img_b, gif_path, y_pred_np_as_batch)
+            # one figure: image+segmentation panel, then each net's map (and their fused
+            # min, which is only worth its own panel when there is more than one net)
+            reward_panels = [r[0].transpose((2, 0, 1)) for r in rew]
+            panel_names = list(getattr(self.reward_func, "nets", {}).keys())
+            if len(rew) > 1:
+                reward_panels = [merged[0].transpose((2, 0, 1))] + reward_panels
+                panel_names = ["reward (min)"] + panel_names
+            save_reward_gif(img_b, reward_panels, gif_path, overlay=y_pred_np_as_batch,
+                            names=panel_names)
 
-        return preds, merged, rew
+        if self.hparams.inference_csv_path:
+            self._write_inference_row(fname, batch, y_pred_np_as_batch, rew, merged,
+                                      resampled_affine)
+
+        #return preds, merged, rew
+
+    def _write_inference_row(self, fname, batch, pred_tchw, rew, merged, resampled_affine):
+        """Append this case's validity flags and reward summaries to this process's csv.
+
+        Column definitions match scripts/score_predictions_offline.py, so rows produced online
+        here stay comparable with the scores computed offline from saved masks.
+        """
+        voxel_spacing = np.asarray([abs(resampled_affine[0, 0]), abs(resampled_affine[1, 1])])
+        anat = is_anatomically_valid(pred_tchw).numpy()
+        temporal_valid, _ = check_temporal_validity(pred_tchw.transpose((0, 2, 1)), voxel_spacing)
+
+        view_as_id = batch.get('view_as_id', None)
+        row = {
+            "case_id": fname,
+            "view_id": int(view_as_id[0]) if view_as_id is not None else None,
+            "n_frames": int(pred_tchw.shape[0]),
+            "anat_valid_frac": float(anat.mean()),
+            "anat_valid_all": bool(anat.all()),
+            "temporal_valid": bool(temporal_valid),
+            # the same gate inference uses to decide whether TTO is needed
+            "validated": bool(anat.all()) and bool(temporal_valid),
+            **reward_stats(merged, "merged"),
+        }
+        # net order follows the reward function's nets, exactly as the gif panels do
+        for name, r in zip(getattr(self.reward_func, "nets", {}).keys(), rew):
+            row.update(reward_stats(r, name))
+
+        append_csv_row(self.hparams.inference_csv_path, row)
 
     def on_predict_epoch_end(self) -> None:
         if not self.hparams.inference:

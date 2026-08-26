@@ -352,7 +352,7 @@ class LazyEchoDataset(Dataset):
                  use_case_list_order=False, limit=None,
                  shard_id=0, num_shards=1, mirror_input_structure=False,
                  skip_existing=False, output_path=None, expect_reward_maps=False,
-                 claim_cases=False):
+                 claim_cases=False, mirror_skip_dirs=()):
         if num_shards < 1:
             raise ValueError(f"num_shards must be >= 1, got {num_shards}")
         if not 0 <= shard_id < num_shards:
@@ -369,6 +369,7 @@ class LazyEchoDataset(Dataset):
         self.limit = limit
         self.input_root = Path(input_path)
         self.mirror_input_structure = mirror_input_structure
+        self.mirror_skip_dirs = {str(d) for d in (mirror_skip_dirs or ())}
         self.claim_cases = claim_cases
         self.shard_id = shard_id
         self.num_shards = num_shards
@@ -548,7 +549,12 @@ class LazyEchoDataset(Dataset):
         }
         if self.mirror_input_structure:
             try:
-                meta["rel_dir"] = input_file_p.parent.relative_to(self.input_root).as_posix()
+                rel = input_file_p.parent.relative_to(self.input_root)
+                # Components named in mirror_skip_dirs are dropped: the input tree's "img" level
+                # only distinguishes images from other modalities on the input side and carries
+                # no meaning among predictions.
+                meta["rel_dir"] = "/".join(pt for pt in rel.parts
+                                           if pt not in self.mirror_skip_dirs)
             except ValueError:
                 # input_path pointed at a single file, so there is no tree to mirror
                 meta["rel_dir"] = ""
@@ -689,6 +695,7 @@ class RL4Seg3DPredictor:
             case_paths=case_paths,
             use_case_list_order=bool(case_order_by),
             mirror_input_structure=cfg.get("mirror_input_structure", False),
+            mirror_skip_dirs=cfg.get("mirror_skip_dirs", ()),
             limit=cfg.get("limit", None),
             shard_id=cfg.get("shard_id", 0),
             num_shards=cfg.get("num_shards", 1),

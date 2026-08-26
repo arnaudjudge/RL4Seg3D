@@ -82,6 +82,13 @@ view_mapping: /data/landmarks_dataset_234ch/view_mapping.json
 # clean tree.
 mirror_input_structure: True
 
+# path components dropped when mirroring: the input tree's "img" level separates images from
+# other modalities on the input side and means nothing among predictions, so
+# <input>/icardio/img/st-X/a4c/di-Y.nii.gz is written to <output>/icardio/st-X/a4c/di-Y.nii.gz.
+# Set to [] to mirror the input path verbatim. Changing this mid-run is safe: claims live in the
+# flat csv/ directory, so resume does not depend on where the predictions themselves sit.
+mirror_skip_dirs: [img]
+
 # output folder to save predictions
 output_path: /data/landmarks_dataset_234ch/pred/random_base_smaller_shift
 

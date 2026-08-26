@@ -49,9 +49,10 @@ case_order_by: null
 # interprets it, so the direction is a convention of the labelling, not of the data.
 case_order_desc: True
 
-# keep only the first N cases of the (ordered) work list that are NOT already predicted;
-# null = all. Applied after the resume check, so with overwrite_existing=False, limit=1 hands
-# back the next unpredicted case each time rather than repeatedly offering a finished one.
+# how many cases THIS task takes: it claims the first N it can win from the top of the priority
+# order (null = as many as it can). Because selection is by what a task can claim rather than by
+# its index, tasks pull densely from one queue and coverage has no gaps -- launch as many tasks
+# as you like and each takes the next N still available.
 limit: null
 
 # csv work lists only: pandas query selecting rows before ids are read, e.g.
@@ -59,9 +60,10 @@ limit: null
 # datamodule/maple.yaml's max_image_area), or "expected_area > 550000" for the rest.
 case_list_query: null
 
-# split the resolved work list across `num_shards` processes and handle only `shard_id`'s share.
-# The split is round-robin over the sorted list, so cases of uneven size even out across shards.
-# On a cluster set shard_id from the array index, e.g. shard_id=$SLURM_ARRAY_TASK_ID.
+# Only used when write_case_csv is False, i.e. when there are no claims to coordinate with: the
+# work list is then split round-robin and this task handles shard_id's share. With claiming on
+# (the default) these are ignored -- how many tasks you launch is what matters, not their ids,
+# so `shard_id=range(0,100)` with any num_shards gives 100 tasks each taking `limit` cases.
 shard_id: 0
 num_shards: 1
 

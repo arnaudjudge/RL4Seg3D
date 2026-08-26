@@ -63,14 +63,26 @@ num_shards: 1
 # the FiLM view conditioning per case. Leave null to predict unconditioned.
 view_mapping: /data/landmarks_dataset_234ch/view_mapping.json
 
+# mirror the input tree inside output_path, so a case read from
+# <input_path>/icardio/img/st-X/a4c/di-Y.nii.gz is written to
+# <output_path>/icardio/img/st-X/a4c/di-Y.nii.gz instead of flat at the root. Keeps tens of
+# thousands of outputs out of one directory (a metadata hot spot on a parallel filesystem, and
+# awkward for inode quotas). The per-shard score csv stays at the root either way.
+mirror_input_structure: False
+
 # output folder to save predictions
 output_path: /data/landmarks_dataset_234ch/pred/random_base_smaller_shift
 
 # passing checkpoint path is necessary for prediction
 ckpt_path: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/full_ckpt_histo-film-long.ckpt
 
-# whether to use test time augmentation
-tta: False
+# whether to use test time augmentation. NOTE the cost: tta_predict runs 25 full
+# sliding-window passes per case (1 + 4 contrast + 4x4 translation + 4 rotation), against 1
+# without it, so segmentation dominates the reward nets instead of the reverse -- budget roughly
+# 7x the per-case time overall and size run_time_min/num_shards accordingly. The rotation branch
+# also loops over frames in python twice per angle (it carries its own "optimize this for compute
+# time" TODO), so the multiplier is worse on long sequences.
+tta: True
 
 # whether to use test time optimization scheme: 'force' (always), 'on' (anatomical or temporal metrics fail) or 'off'
 # any other value will be considered 'off'

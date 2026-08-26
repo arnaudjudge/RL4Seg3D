@@ -404,14 +404,17 @@ class LazyEchoDataset(Dataset):
         run capped by `limit` costs that many stat calls rather than a full traversal -- the
         walk's cost scales with the dataset, this scales with what was actually asked for.
 
-        Already-predicted cases are filtered here rather than afterwards, so `limit` counts
-        cases still to do and early-stop survives: `limit=1` hands back the next case not yet
-        predicted, having stat()ed only as far as it had to.
+        When claiming, this task takes the first `limit` cases it can WIN from the top of the
+        priority order, rather than a fixed slice by index. Index-based slicing shifted: each
+        task recomputes the list at its own start time with claimed cases removed, so index
+        `shard_id` pointed further along for every later-starting task and positions were
+        skipped. Claiming from the top instead gives dense coverage in priority order, and
+        atomicity still guarantees no two tasks take the same case.
 
         Rows whose file is absent are skipped and counted: a csv naming cases that are not on
         disk is a known condition of this dataset, not an error.
         """
-        kept, missing, n_regex_skipped, n_done = [], 0, 0, 0
+        kept, missing, n_regex_skipped, n_taken = [], 0, 0, 0
         for rel in self.case_paths:
             if self.limit is not None and len(kept) >= self.limit:
                 break
@@ -422,15 +425,20 @@ class LazyEchoDataset(Dataset):
             if not f.is_file():
                 missing += 1
                 continue
-            if self.skip_existing and self._outputs_exist(case_id_from_path(f)):
-                n_done += 1
+            case_id = case_id_from_path(f)
+            if self.claim_cases:
+                if not claim_case(self.case_csv_dir, case_id):
+                    n_taken += 1          # finished, or owned by another task
+                    continue
+            elif self.skip_existing and self._outputs_exist(case_id):
+                n_taken += 1
                 continue
             kept.append(f)
 
         log.info(
-            f"Work list -> {len(kept)} file(s) to predict from {len(self.case_paths)} row(s) "
+            f"Work list -> {len(kept)} file(s) claimed from {len(self.case_paths)} row(s) "
             f"({missing} with no file on disk"
-            + (f", {n_done} already predicted" if n_done else "")
+            + (f", {n_taken} done or held by another task" if n_taken else "")
             + (f", {n_regex_skipped} filtered by file_filter_regex" if n_regex_skipped else "")
             + (f", stopped at limit={self.limit}" if self.limit is not None else "") + ")"
         )
@@ -439,12 +447,13 @@ class LazyEchoDataset(Dataset):
     def _collect_files(self, input_path, file_match_regex):
         input_path = Path(input_path)
         if self.case_paths is not None and input_path.is_dir():
-            # resume filtering and `limit` are both applied inside the loop above
+            # claiming (or resume filtering) and `limit` are both applied inside the loop above.
+            # No shard slicing: with claims, which cases a task gets is decided by what it can
+            # win, not by its index, so every task pulls from the top of the same queue.
             files = self._collect_from_work_list(input_path, file_match_regex)
-            n_todo = len(files)
-            files = files[self.shard_id::self.num_shards]
-            log.info(f"{n_todo} not yet predicted -> {len(files)} in shard "
-                     f"{self.shard_id}/{self.num_shards}")
+            if not self.claim_cases:
+                files = files[self.shard_id::self.num_shards]
+                log.info(f"-> {len(files)} in shard {self.shard_id}/{self.num_shards}")
             return files
 
         if input_path.is_file() and input_path.suffix in (".dcm", ".nii") or \
@@ -518,13 +527,6 @@ class LazyEchoDataset(Dataset):
     def __getitem__(self, idx):
         input_file_p = self.input_files[idx]
         case_id = case_id_from_path(input_file_p)
-
-        # Claimed here rather than when the work list was built, so a task that dies holds at
-        # most what its dataloader had prefetched. Losing the race means another task already
-        # has this case: return None and let collate_skip_none drop it.
-        if self.claim_cases and not claim_case(self.case_csv_dir, case_id):
-            print(f"{case_id} claimed by another task, skipping.")
-            return None
 
         data, aff, spacing = load_image(input_file_p)
 

@@ -44,8 +44,9 @@ case_order_by: null
 # interprets it, so the direction is a convention of the labelling, not of the data.
 case_order_desc: True
 
-# keep only the first N cases of the (ordered) work list; null = all. Applied before the
-# resume check, so re-running finishes the same N instead of moving on to the next N.
+# keep only the first N cases of the (ordered) work list that are NOT already predicted;
+# null = all. Applied after the resume check, so with overwrite_existing=False, limit=1 hands
+# back the next unpredicted case each time rather than repeatedly offering a finished one.
 limit: null
 
 # csv work lists only: pandas query selecting rows before ids are read, e.g.

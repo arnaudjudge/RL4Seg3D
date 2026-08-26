@@ -3,6 +3,7 @@ import functools
 import os
 import random
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Union
@@ -706,8 +707,15 @@ class RLmodule3D(LightningModule):
 
     def predict_step(self, batch: dict[str, Tensor], batch_idx: int, dataloader_idx: int = 0) -> Any:
         if self.hparams.inference:
-            final_preds = self.inference_predict_step(batch, batch_idx)
-            return final_preds
+            # One bad case must not take the rest of the task with it. Without this a single OOM
+            # aborts every case still queued behind it in the same process, and on a re-run the
+            # same case aborts whichever task picks it up again -- so a handful of oversized
+            # cases can stall a sweep indefinitely.
+            try:
+                self.inference_predict_step(batch, batch_idx)
+            except Exception as e:
+                self._record_case_failure(batch, e)
+            return None
         # must be batch size 1 as images have varied sizes
         b_img, meta_dict = batch['img'].squeeze(0), batch['image_meta_dict']
         self._current_cond = self._get_cond(batch)
@@ -1012,6 +1020,48 @@ class RLmodule3D(LightningModule):
                                       merged, resampled_affine)
 
         #return preds, merged, rew
+
+    def _record_case_failure(self, batch, exc):
+        """Log a failed case and decide whether it should be attempted again.
+
+        A CUDA OOM is a statement about the GPU, not the case, so its claim is left EMPTY and
+        the case stays eligible for a later run on a larger allocation (empty claims are
+        released with `find <output>/csv -type f -empty -delete`). Any other exception is
+        treated as a property of the case -- an unreadable file, an unexpected shape -- and its
+        claim is FILLED, so it is not retried blindly at every tier of an escalating re-run.
+
+        Either way a row lands in <output>/failures/<job>.csv. The file is per process, so no
+        two writers ever share one and concurrent submissions need no coordination.
+        """
+        properties_dict = batch.get("image_meta_dict", {})
+        fname = (properties_dict.get("case_identifier") or ["<unknown>"])[0]
+        csv_path = (properties_dict.get("case_csv_path") or [""])[0]
+        retryable = isinstance(exc, torch.cuda.OutOfMemoryError)
+
+        detail = str(exc).replace("\n", " ")[:300]
+        print(f"FAILED {fname}: {type(exc).__name__}: {detail}"
+              f" ({'will be retried once its claim is released' if retryable else 'not retried'})")
+        traceback.print_exc()
+
+        if csv_path:
+            out_root = Path(csv_path).parent.parent
+            # unique per process: array task if we are under slurm, pid otherwise
+            job = "-".join(filter(None, [os.environ.get("SLURM_JOB_ID"),
+                                         os.environ.get("SLURM_ARRAY_TASK_ID")])) \
+                  or f"pid{os.getpid()}"
+            append_csv_row(out_root / "failures" / f"{job}.csv", {
+                "case_id": fname,
+                "error_type": type(exc).__name__,
+                "error": detail,
+                "retryable": retryable,
+            })
+            if not retryable:
+                # fills the claim, so the case is not offered again
+                append_csv_row(csv_path, {"case_id": fname, "failed": True,
+                                          "error_type": type(exc).__name__, "error": detail})
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _write_inference_row(self, csv_path, fname, batch, pred_tchw, rew, merged,
                              resampled_affine):

@@ -253,11 +253,16 @@ class PatchlessPreprocess(MapTransform):
         d = dict(data)
         image = d["image"]
 
+        # When the dataset supplies a relative directory, outputs mirror the input tree; the
+        # writers already mkdir their target, so nothing else has to change.
+        rel_dir = image._meta.get("rel_dir", "")
+        save_dir = os.path.join(self.inference_dir, rel_dir) if rel_dir else self.inference_dir
+
         image_meta_dict = {
             "case_identifier": os.path.basename(image._meta["filename_or_obj"]),
             "original_shape": np.array(image.shape[1:]),
             "original_spacing": np.array(image._meta['spacing']),
-            "inference_save_dir": self.inference_dir,
+            "inference_save_dir": save_dir,
             "save_to_gif": self.save_to_gif,
             "save_rewards": self.save_rewards,
         }
@@ -296,7 +301,7 @@ class LazyEchoDataset(Dataset):
     def __init__(self, input_path, transform=None, apply_eq_hist=False, file_match_regex=".*",
                  view_mapping=None, case_ids=None, case_paths=None,
                  use_case_list_order=False, limit=None,
-                 shard_id=0, num_shards=1,
+                 shard_id=0, num_shards=1, mirror_input_structure=False,
                  skip_existing=False, output_path=None, expect_reward_maps=False):
         if num_shards < 1:
             raise ValueError(f"num_shards must be >= 1, got {num_shards}")
@@ -312,19 +317,25 @@ class LazyEchoDataset(Dataset):
                           if case_ids is not None and use_case_list_order else None)
         self.case_paths = case_paths
         self.limit = limit
+        self.input_root = Path(input_path)
+        self.mirror_input_structure = mirror_input_structure
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.skip_existing = skip_existing
         self.expect_reward_maps = expect_reward_maps
         # One directory listing instead of a stat() per case: at tens of thousands of cases on a
         # parallel filesystem the difference is minutes per job.
+        # Basenames only: case identifiers are unique across the dataset, so this works whether
+        # outputs sit flat in output_path or mirror the input tree. Walked once per process
+        # rather than stat()ed per case.
         self.existing_outputs = set()
         if skip_existing:
             if not output_path:
                 raise ValueError("skip_existing requires output_path")
             out_dir = Path(output_path)
             if out_dir.is_dir():
-                self.existing_outputs = set(os.listdir(out_dir))
+                for _, _, filenames in os.walk(out_dir):
+                    self.existing_outputs.update(filenames)
         self.input_files = self._collect_files(input_path, file_match_regex)
 
     def _outputs_exist(self, case_id):
@@ -475,6 +486,12 @@ class LazyEchoDataset(Dataset):
             "spacing": spacing,
             "original_affine": aff,
         }
+        if self.mirror_input_structure:
+            try:
+                meta["rel_dir"] = input_file_p.parent.relative_to(self.input_root).as_posix()
+            except ValueError:
+                # input_path pointed at a single file, so there is no tree to mirror
+                meta["rel_dir"] = ""
         sample = {'image': MetaTensor(torch.tensor(data, dtype=torch.float32), meta=meta)}
 
         if self.view_mapping:
@@ -608,6 +625,7 @@ class RL4Seg3DPredictor:
             case_ids=case_ids,
             case_paths=case_paths,
             use_case_list_order=bool(case_order_by),
+            mirror_input_structure=cfg.get("mirror_input_structure", False),
             limit=cfg.get("limit", None),
             shard_id=cfg.get("shard_id", 0),
             num_shards=cfg.get("num_shards", 1),

@@ -74,7 +74,13 @@ view_mapping: /data/landmarks_dataset_234ch/view_mapping.json
 # <output_path>/icardio/img/st-X/a4c/di-Y.nii.gz instead of flat at the root. Keeps tens of
 # thousands of outputs out of one directory (a metadata hot spot on a parallel filesystem, and
 # awkward for inode quotas). The per-shard score csv stays at the root either way.
-mirror_input_structure: False
+#
+# On by default: at ~46k cases (x2 files with save_rewards) a flat output directory is the
+# wrong shape. Set False for a flat layout. Switching an in-progress run is safe but leaves a
+# mixed tree -- the resume check matches basenames anywhere under output_path, so files already
+# written flat still count as done rather than being duplicated. Use a fresh output_path for a
+# clean tree.
+mirror_input_structure: True
 
 # output folder to save predictions
 output_path: /data/landmarks_dataset_234ch/pred/random_base_smaller_shift

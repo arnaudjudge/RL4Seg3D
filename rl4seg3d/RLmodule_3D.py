@@ -381,6 +381,11 @@ class RLmodule3D(LightningModule):
         b_img, b_gt, meta_dict = batch['img'], batch['gt'], batch['image_meta_dict']
         self._current_cond = self._get_cond(batch)
 
+        # Same reasoning as inference_predict_step: start every case from the checkpoint, never
+        # from the previous case's TTO result.
+        if self.hparams.tto in ('force', 'on'):
+            self._reset_to_initial_params()
+
         self.patch_size = list([b_img.shape[-3], b_img.shape[-2], 4])
         self.inferer.roi_size = self.patch_size
 
@@ -412,7 +417,7 @@ class RLmodule3D(LightningModule):
                                                                       voxel_spacing[0])
         validated = int(all(anat_errors)) and temporal_valid
         if self.hparams.tto == 'force' or (not validated and self.hparams.tto == 'on'):
-            self.actor.actor.net.load_state_dict(self.initial_test_params, strict=False)
+            self._reset_to_initial_params()
 
             start_time = time.time()
             self.ttoptimize(b_img)
@@ -900,9 +905,24 @@ class RLmodule3D(LightningModule):
                   f"    - Sliding window importance map: {'gaussian'}\n")
             self.initial_test_params = copy.deepcopy(self.actor.actor.net.state_dict())
 
+    def _reset_to_initial_params(self):
+        """Restore the checkpoint's weights, undoing any test-time optimisation.
+
+        TTO overfits the net to one case. Without this, the next case is predicted with the
+        previous case's overfit weights -- and only cases that pass validity are affected, since
+        a case that runs TTO restores before optimising. That makes the contamination invisible
+        exactly where nothing appears to have happened.
+        """
+        if self.initial_test_params is not None:
+            self.actor.actor.net.load_state_dict(self.initial_test_params, strict=False)
+
     def inference_predict_step(self, batch: dict[str, Tensor], batch_idx: int):
         img, properties_dict = batch["image"], batch["image_meta_dict"]
         self._current_cond = self._get_cond(batch)
+
+        # Every case starts from the checkpoint, never from a previous case's TTO result.
+        if self.hparams.tto in ('force', 'on'):
+            self._reset_to_initial_params()
 
         self.patch_size = list([img.shape[-3], img.shape[-2], 4])
         self.inferer.roi_size = self.patch_size
@@ -934,7 +954,7 @@ class RLmodule3D(LightningModule):
                                                         voxel_spacing[0])
             validated = int(all(anat_errors)) and temporal_valid
             if self.hparams.tto == 'force' or (not validated and self.hparams.tto == 'on'):
-                self.actor.actor.net.load_state_dict(self.initial_test_params, strict=False)
+                self._reset_to_initial_params()
 
                 start_time = time.time()
                 self.ttoptimize(img)

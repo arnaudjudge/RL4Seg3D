@@ -58,7 +58,6 @@ class RLmodule3D(LightningModule):
                  tto='false',
                  temp_files_path='.',
                  inference=False,
-                 inference_csv_path=None,
                  num_views: int = 0,
                  passive_rewards=None,
                  passive_plot: bool = False,
@@ -1007,14 +1006,20 @@ class RLmodule3D(LightningModule):
             save_reward_gif(img_b, reward_panels, gif_path, overlay=y_pred_np_as_batch,
                             names=panel_names)
 
-        if self.hparams.inference_csv_path:
-            self._write_inference_row(fname, batch, y_pred_np_as_batch, rew, merged,
-                                      resampled_affine)
+        case_csv_path = properties_dict.get("case_csv_path", [""])[0]
+        if case_csv_path:
+            self._write_inference_row(case_csv_path, fname, batch, y_pred_np_as_batch, rew,
+                                      merged, resampled_affine)
 
         #return preds, merged, rew
 
-    def _write_inference_row(self, fname, batch, pred_tchw, rew, merged, resampled_affine):
-        """Append this case's validity flags and reward summaries to this process's csv.
+    def _write_inference_row(self, csv_path, fname, batch, pred_tchw, rew, merged,
+                             resampled_affine):
+        """Write this case's validity flags and reward summaries to the case's own csv.
+
+        One file per case, claimed empty before the case ran and filled here once its outputs
+        are on disk: no two writers ever touch it, so concurrent tasks -- or whole overlapping
+        submissions -- need no coordination, and a non-empty file means the case is complete.
 
         Column definitions match scripts/score_predictions_offline.py, so rows produced online
         here stay comparable with the scores computed offline from saved masks.
@@ -1039,7 +1044,7 @@ class RLmodule3D(LightningModule):
         for name, r in zip(getattr(self.reward_func, "nets", {}).keys(), rew):
             row.update(reward_stats(r, name))
 
-        append_csv_row(self.hparams.inference_csv_path, row)
+        append_csv_row(csv_path, row)
 
     def on_predict_epoch_end(self) -> None:
         if not self.hparams.inference:

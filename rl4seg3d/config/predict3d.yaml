@@ -107,11 +107,25 @@ overwrite_existing: True
 
 save_as_gif: True
 
-# per-case csv of anatomical/temporal validity and reward summaries (one row per case), written
-# incrementally as cases finish. One file per shard by construction: array tasks never share a
-# path, so there is no locking, no deadlock and no interleaved writes to one large csv. Rows are
-# appended, so a resumed shard adds only the cases it actually redoes. Set to null to disable.
-scores_csv: ${output_path}/scores_shard${shard_id}.csv
+# one csv per case, in <output_path>/csv/<case_id>.csv, holding that case's anatomical and
+# temporal validity plus per-net and merged reward summaries.
+#
+# The file doubles as a claim. It is created EMPTY (O_EXCL, so exactly one of any number of
+# racing tasks wins the case) before the case runs, and filled only once the mask and reward
+# maps are on disk. So:
+#   * missing      -> free
+#   * empty        -> a task holds it, or died holding it
+#   * non-empty    -> done
+# That makes concurrent tasks, and whole overlapping submissions, safe without coordinating
+# shard assignment, and it makes `overwrite_existing=False` one directory listing rather than a
+# walk of the output tree.
+#
+# There is deliberately no lease: release abandoned (empty) claims when you choose, with
+#   find <output_path>/csv -type f -empty -delete
+# Aggregate into one table with
+#   find <output_path>/csv -name '*.csv' | head -1 | xargs head -1 > all.csv
+#   find <output_path>/csv -name '*.csv' -exec tail -n +2 {} + >> all.csv
+write_case_csv: True
 
 # also write each case's per-net reward maps as one 4D `_merged_all_rewards.nii.gz`
 # (net axis first, original image grid) -- the layout the SynthEcho tracking
@@ -148,7 +162,6 @@ model:
   divergence_coeff: 0.01
   entropy_coeff: 0.1
   inference: True
-  inference_csv_path: ${scores_csv}
 
 trainer:
   _target_: lightning.pytorch.Trainer

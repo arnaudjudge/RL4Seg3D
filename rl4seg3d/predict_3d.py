@@ -73,6 +73,38 @@ def load_view_mapping(path):
     return mapping
 
 
+CASE_CSV_DIRNAME = "csv"
+
+
+def case_csv_dir(output_path):
+    """Flat directory of one csv per case, at the root of the output tree.
+
+    Flat rather than mirrored on purpose: "which cases are taken" is then a single directory
+    listing instead of one stat per case, and the file is also the claim that stops two
+    concurrently running tasks from predicting the same case.
+    """
+    return Path(output_path) / CASE_CSV_DIRNAME
+
+
+def claim_case(csv_dir, case_id):
+    """Atomically claim a case by creating its csv. True if this process won it.
+
+    O_CREAT|O_EXCL is atomic (on lustre a single MDS operation), so exactly one of any number
+    of racing tasks gets each case -- which is what makes overlapping submissions safe without
+    coordinating shard assignment between them.
+
+    The file is created EMPTY and filled only once the case's outputs are written, so an
+    abandoned claim is identifiable as a zero-length file rather than needing a timestamp or a
+    lease: `find <output>/csv -empty -delete` releases them.
+    """
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.close(os.open(csv_dir / f"{case_id}.csv", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        return False
+
+
 def case_id_from_path(path):
     """Case identifier used to name this case's outputs.
 
@@ -244,7 +276,8 @@ class PatchlessPreprocess(MapTransform):
     """
 
     def __init__(
-            self, keys, common_spacing, inference_dir, save_to_gif, save_rewards=False
+            self, keys, common_spacing, inference_dir, save_to_gif, save_rewards=False,
+            case_csv_dir=None
     ) -> None:
         """Initialize class instance.
 
@@ -258,6 +291,7 @@ class PatchlessPreprocess(MapTransform):
         self.inference_dir = inference_dir
         self.save_to_gif = save_to_gif
         self.save_rewards = save_rewards
+        self.case_csv_dir = case_csv_dir
 
     def __call__(self, data: dict[str, str]):
         # load data
@@ -276,6 +310,10 @@ class PatchlessPreprocess(MapTransform):
             "inference_save_dir": save_dir,
             "save_to_gif": self.save_to_gif,
             "save_rewards": self.save_rewards,
+            # written last, so its presence marks the case complete
+            "case_csv_path": (os.path.join(str(self.case_csv_dir),
+                                           f"{os.path.basename(image._meta['filename_or_obj'])}.csv")
+                              if self.case_csv_dir else ""),
         }
         original_affine = np.array(image._meta["original_affine"].tolist())
         image_meta_dict["original_affine"] = original_affine
@@ -313,7 +351,8 @@ class LazyEchoDataset(Dataset):
                  view_mapping=None, case_ids=None, case_paths=None,
                  use_case_list_order=False, limit=None,
                  shard_id=0, num_shards=1, mirror_input_structure=False,
-                 skip_existing=False, output_path=None, expect_reward_maps=False):
+                 skip_existing=False, output_path=None, expect_reward_maps=False,
+                 claim_cases=False):
         if num_shards < 1:
             raise ValueError(f"num_shards must be >= 1, got {num_shards}")
         if not 0 <= shard_id < num_shards:
@@ -330,35 +369,32 @@ class LazyEchoDataset(Dataset):
         self.limit = limit
         self.input_root = Path(input_path)
         self.mirror_input_structure = mirror_input_structure
+        self.claim_cases = claim_cases
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.skip_existing = skip_existing
         self.expect_reward_maps = expect_reward_maps
         # One directory listing instead of a stat() per case: at tens of thousands of cases on a
         # parallel filesystem the difference is minutes per job.
-        # Basenames only: case identifiers are unique across the dataset, so this works whether
-        # outputs sit flat in output_path or mirror the input tree. Walked once per process
-        # rather than stat()ed per case.
+        # A case is "taken" if its csv exists -- claimed by a running task or already finished.
+        # One listing of the flat csv directory, rather than a walk of the output tree or a stat
+        # per case.
+        self.case_csv_dir = case_csv_dir(output_path) if output_path else None
         self.existing_outputs = set()
         if skip_existing:
             if not output_path:
                 raise ValueError("skip_existing requires output_path")
-            out_dir = Path(output_path)
-            if out_dir.is_dir():
-                for _, _, filenames in os.walk(out_dir):
-                    self.existing_outputs.update(filenames)
+            if self.case_csv_dir.is_dir():
+                self.existing_outputs = set(os.listdir(self.case_csv_dir))
         self.input_files = self._collect_files(input_path, file_match_regex)
 
     def _outputs_exist(self, case_id):
-        """True only when every output this run is configured to write is already present.
+        """True if this case is already claimed or finished, i.e. its csv exists.
 
-        Requiring all of them means a case interrupted between the mask write and the reward
-        map write is redone rather than skipped forever as a partial result.
+        The csv is written last, after the mask and reward maps, so its presence means the case
+        is done; its presence while empty means a task holds (or held) the claim.
         """
-        needed = [f"{case_id}.nii.gz"]
-        if self.expect_reward_maps:
-            needed.append(f"{case_id}_merged_all_rewards.nii.gz")
-        return all(name in self.existing_outputs for name in needed)
+        return f"{case_id}.csv" in self.existing_outputs
 
     def _collect_from_work_list(self, input_path, file_match_regex):
         """Build paths straight from the work list, without touching the input tree.
@@ -480,6 +516,15 @@ class LazyEchoDataset(Dataset):
 
     def __getitem__(self, idx):
         input_file_p = self.input_files[idx]
+        case_id = case_id_from_path(input_file_p)
+
+        # Claimed here rather than when the work list was built, so a task that dies holds at
+        # most what its dataloader had prefetched. Losing the race means another task already
+        # has this case: return None and let collate_skip_none drop it.
+        if self.claim_cases and not claim_case(self.case_csv_dir, case_id):
+            print(f"{case_id} claimed by another task, skipping.")
+            return None
+
         data, aff, spacing = load_image(input_file_p)
 
         if data.shape[-1] < 4:
@@ -496,7 +541,6 @@ class LazyEchoDataset(Dataset):
         # _blur_sigma = 1.5  # in-plane blur strength (pixels); 0 = no change
         # data = gaussian_filter(data, sigma=(0, _blur_sigma, _blur_sigma, 0))  # (C, H, W, T)
 
-        case_id = case_id_from_path(input_file_p)
         meta = {
             "filename_or_obj": case_id,
             "spacing": spacing,
@@ -618,7 +662,10 @@ class RL4Seg3DPredictor:
                                            common_spacing=cfg.common_spacing,
                                            inference_dir=cfg.output_path,
                                            save_to_gif=cfg.save_as_gif,
-                                           save_rewards=save_rewards)
+                                           save_rewards=save_rewards,
+                                           case_csv_dir=(case_csv_dir(cfg.output_path)
+                                                         if cfg.get("write_case_csv", True)
+                                                         else None))
         tf = transforms.compose.Compose([preprocessed, ToTensord(keys="image", track_meta=True)])
 
         # numpy_arr_data = RL4Seg3DPredictor.get_array_dataset(cfg.input_path, cfg.apply_eq_hist, cfg.file_filter_regex)
@@ -651,6 +698,7 @@ class RL4Seg3DPredictor:
             skip_existing=not cfg.get("overwrite_existing", True),
             output_path=cfg.output_path,
             expect_reward_maps=save_rewards,
+            claim_cases=cfg.get("write_case_csv", True),
         )
 
         if len(dataset) == 0:

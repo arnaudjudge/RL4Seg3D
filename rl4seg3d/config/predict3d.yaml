@@ -103,9 +103,14 @@ ckpt_path: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/full_ckpt_histo-film-lo
 # time" TODO), so the multiplier is worse on long sequences.
 tta: True
 
-# whether to use test time optimization scheme: 'force' (always), 'on' (anatomical or temporal metrics fail) or 'off'
-# any other value will be considered 'off'
-tto: 'off'
+# test time optimization: 'force' (always), 'on' (only when the anatomical or temporal metrics
+# fail) or 'off'; any other value is treated as 'off'. Requires trainer.inference_mode: False,
+# set below.
+#
+# Cost: a case that fails validity pays ttoptimize (10 optimisation steps) plus a SECOND full
+# prediction, which with tta is another 25 sliding-window passes -- so a failing case costs
+# roughly twice a passing one. 'force' pays that on every case.
+tto: 'on'
 
 # whether to overwrite existing predictions in the output folder. Set False to skip cases whose
 # outputs are all present already, which is what makes re-submitting an interrupted job cheap:

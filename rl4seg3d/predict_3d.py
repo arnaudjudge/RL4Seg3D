@@ -111,7 +111,7 @@ def load_case_list(path, column=None, query=None, order_by=None, order_desc=True
 
     path = Path(path)
     if path.suffix.lower() == ".csv":
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, low_memory=False)
         if query:
             before = len(df)
             df = df.query(query)
@@ -147,23 +147,34 @@ def load_case_list(path, column=None, query=None, order_by=None, order_desc=True
 
         log.info(f"Reading case ids from column {column!r} of {path}")
         sub = df[df[column].notna()]
-        entries = sub[column].astype(str).tolist()
 
         rel_paths = None
         if path_template:
-            missing_cols = sorted(
-                f for _, f, _, _ in string.Formatter().parse(path_template)
-                if f and f not in sub.columns
-            )
-            if missing_cols:
+            tpl_cols = [f for _, f, _, _ in string.Formatter().parse(path_template) if f]
+            unknown = sorted(c for c in tpl_cols if c not in sub.columns)
+            if unknown:
                 raise ValueError(
-                    f"case_path_template references column(s) {missing_cols} not in {path} "
+                    f"case_path_template references column(s) {unknown} not in {path} "
                     f"(available: {list(sub.columns)})"
+                )
+            # Rows missing any column the template needs cannot name a file at all -- str.format
+            # would turn the NaN into the literal "nan" and the case would be reported as merely
+            # absent from disk, which is a different and recoverable condition. Drop them here so
+            # the two are not conflated and a resumed run stops retrying them forever.
+            n_before = len(sub)
+            sub = sub.dropna(subset=tpl_cols)
+            n_dropped = n_before - len(sub)
+            if n_dropped:
+                log.warning(
+                    f"Dropped {n_dropped} row(s) with no value in {tpl_cols} -- they cannot "
+                    f"name a file and would never produce output"
                 )
             rel_paths = [path_template.format(**row)
                          for row in sub.to_dict(orient="records")]
             log.info(f"Building paths from {path_template!r} "
                      f"(no input tree scan); e.g. {rel_paths[0] if rel_paths else '-'}")
+
+        entries = sub[column].astype(str).tolist()
         return _dedupe_work_list(entries, rel_paths, path)
     else:
         for name, val in (("case_list_query", query), ("case_order_by", order_by)):
@@ -356,10 +367,14 @@ class LazyEchoDataset(Dataset):
         run capped by `limit` costs that many stat calls rather than a full traversal -- the
         walk's cost scales with the dataset, this scales with what was actually asked for.
 
+        Already-predicted cases are filtered here rather than afterwards, so `limit` counts
+        cases still to do and early-stop survives: `limit=1` hands back the next case not yet
+        predicted, having stat()ed only as far as it had to.
+
         Rows whose file is absent are skipped and counted: a csv naming cases that are not on
         disk is a known condition of this dataset, not an error.
         """
-        kept, missing, n_regex_skipped = [], 0, 0
+        kept, missing, n_regex_skipped, n_done = [], 0, 0, 0
         for rel in self.case_paths:
             if self.limit is not None and len(kept) >= self.limit:
                 break
@@ -370,11 +385,15 @@ class LazyEchoDataset(Dataset):
             if not f.is_file():
                 missing += 1
                 continue
+            if self.skip_existing and self._outputs_exist(case_id_from_path(f)):
+                n_done += 1
+                continue
             kept.append(f)
 
         log.info(
-            f"Work list -> {len(kept)} file(s) resolved from {len(self.case_paths)} row(s) "
+            f"Work list -> {len(kept)} file(s) to predict from {len(self.case_paths)} row(s) "
             f"({missing} with no file on disk"
+            + (f", {n_done} already predicted" if n_done else "")
             + (f", {n_regex_skipped} filtered by file_filter_regex" if n_regex_skipped else "")
             + (f", stopped at limit={self.limit}" if self.limit is not None else "") + ")"
         )
@@ -383,11 +402,8 @@ class LazyEchoDataset(Dataset):
     def _collect_files(self, input_path, file_match_regex):
         input_path = Path(input_path)
         if self.case_paths is not None and input_path.is_dir():
+            # resume filtering and `limit` are both applied inside the loop above
             files = self._collect_from_work_list(input_path, file_match_regex)
-            # `limit` is already applied above; skipping still happens before sharding so a
-            # re-run spreads the remaining cases over every shard.
-            if self.skip_existing:
-                files = [f for f in files if not self._outputs_exist(case_id_from_path(f))]
             n_todo = len(files)
             files = files[self.shard_id::self.num_shards]
             log.info(f"{n_todo} not yet predicted -> {len(files)} in shard "
@@ -431,12 +447,6 @@ class LazyEchoDataset(Dataset):
         if self.case_rank is not None:
             files = sorted(files, key=lambda f: self.case_rank[case_id_from_path(f)])
 
-        # `limit` applies BEFORE skip_existing so the truncated set is stable: a resumed run
-        # finishes the same top-N rather than moving on to the next N.
-        if self.limit is not None:
-            files = files[:self.limit]
-        n_limited = len(files)
-
         # Skipping happens before sharding so that re-running to fill holes spreads the
         # remaining cases over every shard, instead of leaving most jobs with nothing to do
         # while a few carry all the leftovers.
@@ -444,12 +454,18 @@ class LazyEchoDataset(Dataset):
             files = [f for f in files if not self._outputs_exist(case_id_from_path(f))]
         n_todo = len(files)
 
+        # `limit` counts cases still to do, so limit=N always yields N unpredicted cases (or
+        # everything left, if fewer) rather than N that may already be finished.
+        if self.limit is not None:
+            files = files[:self.limit]
+        n_limited = len(files)
+
         files = files[self.shard_id::self.num_shards]
 
         log.info(
             f"Work list: {n_found} file(s) found -> {n_regex} after file_filter_regex "
-            f"-> {n_listed} after case_list -> {n_limited} after limit "
-            f"-> {n_todo} not yet predicted "
+            f"-> {n_listed} after case_list -> {n_todo} not yet predicted "
+            f"-> {n_limited} after limit "
             f"-> {len(files)} in shard {self.shard_id}/{self.num_shards}"
         )
         if self.case_ids is not None and n_listed < len(self.case_ids):

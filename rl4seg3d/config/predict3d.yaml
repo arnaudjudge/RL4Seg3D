@@ -32,8 +32,13 @@ case_list_column: null
 # straight from the csv and the input tree is never scanned -- discovery then costs one stat per
 # case actually wanted instead of a full traversal, which matters most because every array task
 # would otherwise repeat that traversal. Rows naming a file that is not on disk are skipped and
-# counted. Leave null to discover by scanning input_path.
-case_path_template: null
+# counted. Set to null to discover by scanning input_path instead.
+#
+# Default matches the maple_norm layout: <dataset>/img/<study>/<view>/<id>.nii.gz, where
+# `relative_path` already holds <study>/<view>/<id>. Must stay quoted -- unquoted braces are a
+# YAML flow mapping. A csv lacking either column now fails immediately, listing the columns it
+# does have, rather than silently falling back to a full scan.
+case_path_template: "{dataset}/img/{relative_path}.nii.gz"
 
 # csv work lists only: column to prioritise cases by, so that `limit` keeps the cases worth
 # having rather than an arbitrary slice. e.g. IQ_expval to take the best image quality first.

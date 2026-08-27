@@ -355,8 +355,12 @@ class LazyEchoDataset(Dataset):
                  claim_cases=False, mirror_skip_dirs=()):
         if num_shards < 1:
             raise ValueError(f"num_shards must be >= 1, got {num_shards}")
-        if not 0 <= shard_id < num_shards:
-            raise ValueError(f"shard_id must be in [0, {num_shards}), got {shard_id}")
+        # Only meaningful without claiming. With claims on, shard_id exists purely so hydra has
+        # something to sweep over to create N tasks -- its value is never used to pick cases, so
+        # requiring it to agree with num_shards would be a constraint on nothing.
+        if not claim_cases and not 0 <= shard_id < num_shards:
+            raise ValueError(f"shard_id must be in [0, {num_shards}), got {shard_id} "
+                             f"(shard_id/num_shards are only used when write_case_csv is False)")
 
         self.transform = transform
         self.apply_eq_hist = apply_eq_hist

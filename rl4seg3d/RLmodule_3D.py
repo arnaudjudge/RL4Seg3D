@@ -36,6 +36,14 @@ from rl4seg3d.utils.temporal_metrics import check_temporal_validity
 from rl4seg3d.utils.viz_utils import save_reward_gif
 from vital.metrics.camus.anatomical.utils import check_segmentation_validity
 
+try:
+    # submitit raises this inside the process when the walltime signal fires. It says nothing
+    # about the case, so it must not be mistaken for one failing.
+    from submitit.core.utils import UncompletedJobError as _JobEndedError
+except Exception:  # submitit absent (local runs)
+    class _JobEndedError(Exception):
+        """Never raised; placeholder so the isinstance check below is always valid."""
+
 
 class RLmodule3D(LightningModule):
 
@@ -1044,11 +1052,18 @@ class RLmodule3D(LightningModule):
     def _record_case_failure(self, batch, exc):
         """Log a failed case and decide whether it should be attempted again.
 
-        A CUDA OOM is a statement about the GPU, not the case, so its claim is left EMPTY and
-        the case stays eligible for a later run on a larger allocation (empty claims are
-        released with `find <output>/csv -type f -empty -delete`). Any other exception is
-        treated as a property of the case -- an unreadable file, an unexpected shape -- and its
-        claim is FILLED, so it is not retried blindly at every tier of an escalating re-run.
+        Two kinds of failure say nothing about the case and must stay eligible for a later run,
+        so their claim is left EMPTY (released with
+        `find <output>/csv -type f -empty -delete`):
+
+          * a CUDA OOM, which is a statement about the GPU, and
+          * submitit ending the job on walltime, which is a statement about run_time_min. That
+            one is also re-raised: the process is being torn down, so there is nothing to be
+            gained by continuing to the next case.
+
+        Any other exception is treated as a property of the case -- an unreadable file, an
+        unexpected shape -- and its claim is FILLED, so it is not retried blindly at every tier
+        of an escalating re-run.
 
         Either way a row lands in <output>/failures/<job>.csv. The file is per process, so no
         two writers ever share one and concurrent submissions need no coordination.
@@ -1056,7 +1071,8 @@ class RLmodule3D(LightningModule):
         properties_dict = batch.get("image_meta_dict", {})
         fname = (properties_dict.get("case_identifier") or ["<unknown>"])[0]
         csv_path = (properties_dict.get("case_csv_path") or [""])[0]
-        retryable = isinstance(exc, torch.cuda.OutOfMemoryError)
+        job_ended = isinstance(exc, _JobEndedError)
+        retryable = job_ended or isinstance(exc, torch.cuda.OutOfMemoryError)
 
         detail = str(exc).replace("\n", " ")[:300]
         print(f"FAILED {fname}: {type(exc).__name__}: {detail}"
@@ -1082,6 +1098,9 @@ class RLmodule3D(LightningModule):
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        if job_ended:
+            raise exc
 
     def _write_inference_row(self, csv_path, fname, batch, pred_tchw, rew, merged,
                              resampled_affine):

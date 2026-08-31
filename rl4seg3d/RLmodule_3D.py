@@ -64,18 +64,14 @@ class RLmodule3D(LightningModule):
                  save_csv_after_predict=None,
                  val_batch_size=4,
                  tta=True,
-                 tto='false',
+                 tto='off',
                  temp_files_path='.',
                  inference=False,
                  num_views: int = 0,
-                 passive_rewards=None,
-                 passive_plot: bool = False,
-                 passive_log_images: bool = False,
-                 passive_log_images_every_n: int = 25,
                  *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
-        self.save_hyperparameters(logger=False, ignore=["actor", "reward", "corrector", "passive_rewards"])
+        self.save_hyperparameters(logger=False, ignore=["actor", "reward", "corrector"])
 
         self.actor = actor
         self.reward_func = reward
@@ -88,22 +84,6 @@ class RLmodule3D(LightningModule):
             elif isinstance(self.reward_func.nets, dict):
                 for i, n in enumerate(self.reward_func.nets.values()):
                     self.register_module(f'rewardnet_{i}', n)
-
-        # Passive "observer" reward nets: scored on the SAME rollout actions each step and
-        # logged, but NOT used for the loss. Used to A/B two reward nets on the identical
-        # (evolving-policy) rollout distribution, confound-free. Register their nets so
-        # Lightning moves them to the right device with the module.
-        self.passive_rewards = passive_rewards or {}
-        for name, rf in self.passive_rewards.items():
-            nets = rf.nets.values() if isinstance(getattr(rf, 'nets', None), dict) \
-                else getattr(rf, 'nets', [])
-            for i, n in enumerate(nets):
-                self.register_module(f'passive_{name}_{i}', n)
-        # naive step-by-step plot of the three reward maps (blocking plt.show each step)
-        self.passive_plot = passive_plot
-        # log the passive reward MAPS as images to the logger (Comet) every N steps
-        self.passive_log_images = passive_log_images
-        self.passive_log_images_every_n = max(int(passive_log_images_every_n), 1)
 
         self.pred_corrector = corrector
         if isinstance(self.pred_corrector, AEMorphoCorrector):
@@ -183,99 +163,6 @@ class RLmodule3D(LightningModule):
         if cond.dim() == 1:
             return cond.expand(batch_size)
         return cond.expand(batch_size, -1)
-
-    @torch.no_grad()
-    def log_passive_rewards(self, actions, imgs, gt, cond, active_rewards, batch):
-        """Score `actions` with each passive observer reward net and log per-step means.
-
-        Non-invasive: does not affect the training loss. Enables a confound-free A/B of
-        reward nets on the actual rollout distribution. Also logs the active (training)
-        reward and the view id so noise can be stratified by view offline.
-        """
-        if not self.passive_rewards:
-            return
-
-        def _mean(rew_list):
-            return torch.mean(torch.stack([r.float().mean() for r in rew_list]))
-
-        values, maps = {}, {}
-        for name, rf in self.passive_rewards.items():
-            for n in rf.get_nets():
-                n.eval()
-            r = rf(actions, imgs, gt, cond=cond)
-            values[name] = _mean(r)
-            maps[name] = r[0]           # (B, H, W, D)
-        values['active_combined'] = _mean(active_rewards)
-        maps['active_combined'] = active_rewards[0]
-        for name, val in values.items():
-            self.log(f'train/passive/{name}', val,
-                     on_step=True, on_epoch=False, prog_bar=False, batch_size=1)
-        vid = batch.get('view_as_id') if isinstance(batch, dict) else None
-        if vid is not None:
-            self.log('train/passive/view_id', vid.float().view(-1)[0],
-                     on_step=True, on_epoch=False, prog_bar=False, batch_size=1)
-
-        if self.passive_plot:
-            self._show_passive_plot(maps, actions)
-        if self.passive_log_images and self.trainer.global_rank == 0 \
-                and (self.global_step % self.passive_log_images_every_n == 0):
-            self._log_passive_maps(maps, actions)
-
-    def _build_passive_fig(self, maps, actions):
-        """Build a figure: segmentation + each passive/active reward MAP at a random frame.
-
-        Returns (fig, frame_index). Panels share the same time index for comparability.
-        """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        D = next(iter(maps.values())).shape[-1]
-        j = int(np.random.randint(D))
-        seg = actions[0, ..., j].detach().float().cpu().numpy()
-
-        panels = list(maps.items())
-        fig = plt.figure('reward maps', figsize=(4 * (len(panels) + 1), 4))
-        fig.clf()
-        axes = fig.subplots(1, len(panels) + 1)
-        axes[0].imshow(seg.T, origin='lower', cmap='gray')
-        axes[0].set_title(f'segmentation (t={j})')
-        axes[0].axis('off')
-        for ax, (name, m) in zip(axes[1:], panels):
-            img = m[0, ..., j].detach().float().cpu().numpy()
-            im = ax.imshow(img.T, origin='lower', cmap='viridis', vmin=0, vmax=1)
-            ax.set_title(f'{name}\nmean={img.mean():.3f}')
-            ax.axis('off')
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        fig.tight_layout()
-        return fig, j
-
-    def _show_passive_plot(self, maps, actions):
-        """Naive blocking plot of the reward MAPS at a random time index.
-
-        Pops up a plt.show() window each step; close it to advance. Wrapped so a missing
-        display never breaks training.
-        """
-        try:
-            import matplotlib.pyplot as plt
-            fig, _ = self._build_passive_fig(maps, actions)
-            fig.suptitle('passive reward maps (close window to continue)')
-            plt.show()
-        except Exception as e:
-            print(f"[passive_plot disabled: {e}]")
-            self.passive_plot = False
-
-    def _log_passive_maps(self, maps, actions):
-        """Log the passive/active reward MAPS as an image to the logger (Comet)."""
-        try:
-            import matplotlib.pyplot as plt
-            from lightning.pytorch.loggers import CometLogger
-            fig, j = self._build_passive_fig(maps, actions)
-            if isinstance(self.logger, CometLogger):
-                self.logger.experiment.log_figure(
-                    f"passive_reward_maps_t{j}", fig, step=self.global_step)
-            plt.close(fig)
-        except Exception as e:
-            print(f"[passive image logging disabled: {e}]")
-            self.passive_log_images = False
 
     def training_step(self, batch: dict[str, Tensor], nb_batch):
         """
@@ -458,8 +345,7 @@ class RLmodule3D(LightningModule):
                                                                           cond=self._current_cond), dim=0)
         prev_rewards_mean = torch.mean(prev_rewards, dim=0)
 
-        #logs = full_test_metrics(y_pred_np_as_batch, b_gt_np_as_batch, voxel_spacing, self.device)
-        logs = {'loss': 0}
+        logs = full_test_metrics(y_pred_np_as_batch, b_gt_np_as_batch, voxel_spacing, self.device)
         logs.update({"test/reward": torch.mean(prev_rewards_mean.type(torch.float))})
 
         if self.hparams.vae_on_test:
@@ -495,7 +381,7 @@ class RLmodule3D(LightningModule):
         _, _, _, _, v, _ = self.actor.evaluate(b_img[..., :4], prev_actions[..., :4],
                                                 cond=self._expand_cond(self._current_cond, b_img.shape[0]))
 
-        if self.trainer.global_rank == 0 and batch_idx % 1 == 123:
+        if self.trainer.global_rank == 0 and batch_idx % 1 == 0:
             log_video(self.logger, img=b_gt, background=b_img.squeeze(0), title='test_GroundTruth', number=batch_idx,
                          epoch=self.current_epoch)
             log_video(self.logger, img=prev_actions, background=b_img.squeeze(0), title='test_Prediction',
@@ -520,7 +406,7 @@ class RLmodule3D(LightningModule):
             fname = meta_dict.get("case_identifier")[0]
             spacing = meta_dict.get("original_spacing").cpu().detach().numpy()[0]
             resampled_affine = meta_dict.get("resampled_affine").cpu().detach().numpy()[0]
-            save_dir = os.path.join(self.trainer.default_root_dir, f"testing_raw_cheatedmanyepochs/{self.trainer.datamodule.get_approx_gt_subpath(fname).rsplit('/', 1)[0]}/")
+            save_dir = os.path.join(self.trainer.default_root_dir, f"testing_raw_rorqual_e76/{self.trainer.datamodule.get_approx_gt_subpath(fname).rsplit('/', 1)[0]}/")
 
             final_preds = np.expand_dims(prev_actions, 0)
             transform = tio.Resample(spacing)

@@ -877,10 +877,6 @@ class RLmodule3D(LightningModule):
         merged = functools.reduce(torch.minimum, rew) if len(rew) > 1 else rew[0]
 
         preds = preds.cpu().detach().numpy()
-        # # TEMP: perturb the segmentation base off the mitral valve for reward-net dataset
-        # # generation (only touches the segmentation) — DELETE AFTER.
-        # preds[0] = perturb_segmentation_base(preds[0].transpose(2, 0, 1)).transpose(1, 2, 0)
-        # y_pred_np_as_batch = preds[0].transpose((2, 0, 1))
         merged = merged.cpu().detach().numpy()
         rew = [r.cpu().detach().numpy() for r in rew]
 

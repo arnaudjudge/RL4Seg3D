@@ -543,10 +543,6 @@ class LazyEchoDataset(Dataset):
         data = rescale(data)
         if self.apply_eq_hist:
             data = apply_eq_adapthist(data)
-        # TEMP: hardcoded spatial Gaussian blur for one run — DELETE AFTER.
-        # from scipy.ndimage import gaussian_filter
-        # _blur_sigma = 1.5  # in-plane blur strength (pixels); 0 = no change
-        # data = gaussian_filter(data, sigma=(0, _blur_sigma, _blur_sigma, 0))  # (C, H, W, T)
 
         meta = {
             "filename_or_obj": case_id,
@@ -750,13 +746,6 @@ class RL4Seg3DPredictor:
         sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
         sd = {(k[len("net."):] if k.startswith("net.") else k): v for k, v in sd.items()}
         model.actor.actor.net.load_state_dict(sd)
-
-        # TEMP: inject small Gaussian noise into net weights before predicting — DELETE AFTER.
-        # _noise = 0.5  # relative scale (fraction of each param's RMS magnitude)
-        # with torch.no_grad():
-        #     for p in model.actor.actor.net.parameters():
-        #         rms = p.data.pow(2).mean().sqrt()
-        #         p.add_(torch.randn_like(p) * _noise * rms)
 
         # return_predictions=False stops Lightning retaining every predict_step result for the
         # whole epoch. Nothing needs them (each case is written to disk as it is produced), and

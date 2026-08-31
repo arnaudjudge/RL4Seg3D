@@ -67,10 +67,6 @@ hydra:
     # Set SLURM_ACCOUNT in .env (alongside PROJECT_ROOT) to avoid repeating --account.
     account: ${oc.env:SLURM_ACCOUNT,null}
 
-    # No data staging: tasks read input_path directly off the shared filesystem.
-    setup:
-      - "module load httpproxy"
-
     # Concurrent array tasks. Left at the submitit default; throttle on the command line for the
     # full sweep so 96 tasks do not all hit the queue at once.
     # array_parallelism: 20

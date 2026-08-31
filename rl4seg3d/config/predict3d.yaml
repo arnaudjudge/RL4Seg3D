@@ -15,7 +15,7 @@ task_name: "predict"
 tags: ["predict"]
 
 # input folder containing data for inference
-input_path: /data/landmarks_dataset_234ch/img/
+input_path: ???
 
 file_filter_regex: .*
 
@@ -69,7 +69,7 @@ num_shards: 1
 
 # optional path to a {case_identifier: view_str} JSON (e.g. "di-XXXX": "A4C") used to set
 # the FiLM view conditioning per case. Leave null to predict unconditioned.
-view_mapping: /data/landmarks_dataset_234ch/view_mapping.json
+view_mapping: null
 
 # mirror the input tree inside output_path, so a case read from
 # <input_path>/icardio/img/st-X/a4c/di-Y.nii.gz is written to
@@ -92,10 +92,10 @@ mirror_input_structure: True
 mirror_skip_dirs: [img]
 
 # output folder to save predictions
-output_path: /data/landmarks_dataset_234ch/pred/random_base_smaller_shift
+output_path: ???
 
 # passing checkpoint path is necessary for prediction
-ckpt_path: /home/local/USHERBROOKE/juda2901/dev/RL4Seg3D/full_ckpt_histo-film-long.ckpt
+ckpt_path: ???
 
 # whether to use test time augmentation. NOTE the cost: tta_predict runs 25 full
 # sliding-window passes per case (1 + 4 contrast + 4x4 translation + 4 rotation), against 1

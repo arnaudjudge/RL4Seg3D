@@ -126,7 +126,7 @@ class RLmodule3D(LightningModule):
         net = self._policy_net()
         if net is not None and hasattr(net, 'view_embed'):
             return view_id
-        return view_id #F.one_hot(view_id, num_classes=self.hparams.num_views).float()
+        return F.one_hot(view_id, num_classes=self.hparams.num_views).float()
 
     @torch.no_grad()  # no grad since tensors are reused in PPO's for loop
     def rollout(self, imgs: torch.tensor, gt: torch.tensor, use_gt: torch.tensor = None,

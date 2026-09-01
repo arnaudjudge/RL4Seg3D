@@ -27,7 +27,7 @@ Preprint available at: https://www.arxiv.org/abs/2406.17902
 
 ## Inference
 ### Easiest: Torch Script
-The simplest way to use the RL4Seg3D model for inference on any nifti file containing echocardiography image sequences (A2C or A4C views)
+The simplest way to use the RL4Seg3D model for inference on any nifti file containing echocardiography image sequences (A2C, A3C or A4C views)
 is to use the TorchScript compiled model. For this, you will need a basic python environment with numpy, nibabel, torch and other basic packages.
 The `torchscript_predict_3d.py` script enables simple prediction using the following command:
 ```bash
@@ -35,10 +35,39 @@ The `torchscript_predict_3d.py` script enables simple prediction using the follo
 ```
 You can toggle off test-time adaptation (TTA) with the `--no_tta` flag for faster inference with slightly lower quality.
 
-** Tip: Consider applying skimage.exposure.equalize_adapthist() to images before inference (it was applied to training data). 
+It writes one segmentation per input sequence, plus one NIfTI per reward net and their fused
+(elementwise minimum) map, so each prediction comes with the model's own estimate of where it
+is trustworthy.
+
+**View conditioning.** The current models are conditioned on the echo view, and the view is
+read from each file's path (a `a2c`/`a3c`/`a4c` directory, or the filename). Pass `--view` to
+set it explicitly when the path does not carry it. Older, unconditioned checkpoints still work
+and ignore the view.
+
+** Tip: pass `--equalize` to apply skimage.exposure.equalize_adapthist() to images before inference
+(it was applied to training data). Do NOT pass it for images from an already-normalised dataset --
+equalizing twice is as wrong as not equalizing at all.
 Full script (Docker included) applies it by default.
 
 ** Make sure to have run `git lfs pull` to get the checkpoint downloaded. 
+
+#### Packaging a new checkpoint
+
+`export_torchscript_3d.py` turns a training checkpoint into one of these self-contained models.
+A full RL checkpoint carries the actor and every reward net, so it is the only input needed:
+
+```bash
+   python export_torchscript_3d.py --ckpt <RL_CHECKPOINT>.ckpt --out data/checkpoints/<NAME>.pt
+```
+
+Add `--no-rewards` for a smaller, segmentation-only model. The packaged model reproduces the
+inference path of `predict_3d.py` -- sliding window, TTA, reward maps -- but not its test-time
+optimization, which cannot be expressed as a TorchScript graph. Verify a new package against
+the pipeline with:
+
+```bash
+   python rl4seg3d/scripts/validate_torchscript_package.py --package <NAME>.pt --ckpt <RL_CHECKPOINT>.ckpt
+```
 
 ### Complete: Docker container
 We also provide a Docker image to run the full inference script, including test-time optimization. 

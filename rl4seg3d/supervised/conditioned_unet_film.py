@@ -70,8 +70,15 @@ class _FiLMLayer(nn.Module):
         if cond is not None:
             gamma, beta = self.proj(cond).chunk(2, dim=-1)
             B = x.shape[0]
-            s = (1,) * (x.dim() - 2)
-            x = x * (1.0 + gamma.view(B, -1, *s)) + beta.view(B, -1, *s)
+            C = x.shape[1]
+            # Spelled out per rank instead of `view(B, -1, *(1,) * (x.dim() - 2))`: the
+            # starred list has no statically known length, which is the one thing that
+            # stops torch.jit.script from compiling this module (see
+            # rl4seg3d/packaging/scriptable_unet.py). Same arithmetic either way.
+            if x.dim() == 5:
+                x = x * (1.0 + gamma.reshape(B, C, 1, 1, 1)) + beta.reshape(B, C, 1, 1, 1)
+            else:
+                x = x * (1.0 + gamma.reshape(B, C, 1, 1)) + beta.reshape(B, C, 1, 1)
         return self.lrelu(x)
 
 

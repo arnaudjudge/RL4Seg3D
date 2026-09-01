@@ -42,6 +42,9 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("output", help="output_path of the sweep (the dir holding csv/)")
     p.add_argument("lists", nargs="+", help="case list csv(s), or a directory of them")
+    p.add_argument("--retry-list", metavar="OUT.csv", default=None,
+                   help="write a case list of just the cases that failed for a reason a bigger "
+                        "allocation could fix (OOM, walltime), for a targeted retry tier")
     p.add_argument("--failures", action="store_true",
                    help="also summarise <output>/failures/*.csv by error type")
     args = p.parse_args()
@@ -85,6 +88,24 @@ def main():
     unlisted = (settled | held) - set().union(*(case_ids(c) for c in csvs))
     if unlisted:
         print(f"\n{len(unlisted)} claim(s) not in any listed case list")
+
+    if args.retry_list:
+        # Only the failures a larger allocation could fix. Cases never attempted are deliberately
+        # excluded: a retry tier exists to spend a bigger GPU on the hard cases, not to redo the
+        # backlog on it. Rows are carried over whole, so the retry list keeps every column the
+        # predict config needs.
+        want = set(failures[failures.retryable]["case_id"].astype(str)) - done - failed
+        parts = []
+        for csv in csvs:
+            df = pd.read_csv(csv, low_memory=False)
+            col = next(c for c in ID_COLUMNS if c in df.columns)
+            parts.append(df[df[col].astype(str).isin(want)])
+        retry = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        Path(args.retry_list).parent.mkdir(parents=True, exist_ok=True)
+        retry.to_csv(args.retry_list, index=False)
+        missing = len(want) - len(retry)
+        print(f"\nwrote {len(retry)} case(s) to {args.retry_list}"
+              + (f"  ({missing} failed id(s) not in any listed case list)" if missing else ""))
 
     if args.failures:
         if not len(failures):

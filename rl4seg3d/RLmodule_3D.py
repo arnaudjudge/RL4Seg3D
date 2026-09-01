@@ -45,6 +45,11 @@ except Exception:  # submitit absent (local runs)
         """Never raised; placeholder so the isinstance check below is always valid."""
 
 
+# Reward-net subsets to fuse and report alongside the full merge, in the csv written per case.
+# Each is scored exactly as `merged` is; a subset whose nets are not all loaded is skipped.
+_FUSION_SUBSETS = [("anatomical", "landmarks")]
+
+
 class RLmodule3D(LightningModule):
 
     def __init__(self, actor, reward,
@@ -1012,8 +1017,18 @@ class RLmodule3D(LightningModule):
             **reward_stats(merged, "merged"),
         }
         # net order follows the reward function's nets, exactly as the gif panels do
-        for name, r in zip(getattr(self.reward_func, "nets", {}).keys(), rew):
+        by_name = dict(zip(getattr(self.reward_func, "nets", {}).keys(), rew))
+        for name, r in by_name.items():
             row.update(reward_stats(r, name))
+
+        # Named subsets fused the same way the full merge is (elementwise minimum: a pixel is
+        # high-reward only where every net in the subset agrees). Lets a run be scored against a
+        # narrower gate than the one it was produced with -- e.g. anatomical+landmarks, without
+        # apex -- without re-predicting. Column names match scripts/... fusion ablation output.
+        for subset in _FUSION_SUBSETS:
+            if all(n in by_name for n in subset):
+                fused = functools.reduce(np.minimum, (by_name[n] for n in subset))
+                row.update(reward_stats(fused, "+".join(subset)))
 
         append_csv_row(csv_path, row)
 

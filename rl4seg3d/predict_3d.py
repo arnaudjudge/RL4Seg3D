@@ -375,6 +375,8 @@ class LazyEchoDataset(Dataset):
         self.mirror_input_structure = mirror_input_structure
         self.mirror_skip_dirs = {str(d) for d in (mirror_skip_dirs or ())}
         self.claim_cases = claim_cases
+        # case ids this process won, so it can hand back the ones it never got to
+        self.claimed_ids = []
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.skip_existing = skip_existing
@@ -392,6 +394,31 @@ class LazyEchoDataset(Dataset):
             if self.case_csv_dir.is_dir():
                 self.existing_outputs = set(os.listdir(self.case_csv_dir))
         self.input_files = self._collect_files(input_path, file_match_regex)
+
+    def release_unfinished_claims(self):
+        """Hand back the claims this process took but never filled.
+
+        `limit` cases are claimed up front, so a task killed on walltime would otherwise strand
+        every case it had not reached: the claim marks them taken, and no later run would offer
+        them again until someone ran `find <output>/csv -type f -empty -delete` by hand. Releasing
+        them here makes that a backstop for hard kills rather than a required step.
+
+        Only zero-length claims are removed. A filled one means the case completed, and nothing
+        else can hold either kind: a claim is exclusive to the process that won it.
+        """
+        released = []
+        for case_id in self.claimed_ids:
+            f = self.case_csv_dir / f"{case_id}.csv"
+            try:
+                if f.stat().st_size == 0:
+                    f.unlink()
+                    released.append(case_id)
+            except FileNotFoundError:
+                pass
+        if released:
+            log.info(f"Released {len(released)} unfinished claim(s) for the next run: "
+                     f"{', '.join(released[:5])}{' ...' if len(released) > 5 else ''}")
+        return released
 
     def _outputs_exist(self, case_id):
         """True if this case is already claimed or finished, i.e. its csv exists.
@@ -434,6 +461,7 @@ class LazyEchoDataset(Dataset):
                 if not claim_case(self.case_csv_dir, case_id):
                     n_taken += 1          # finished, or owned by another task
                     continue
+                self.claimed_ids.append(case_id)
             elif self.skip_existing and self._outputs_exist(case_id):
                 n_taken += 1
                 continue
@@ -750,7 +778,13 @@ class RL4Seg3DPredictor:
         # return_predictions=False stops Lightning retaining every predict_step result for the
         # whole epoch. Nothing needs them (each case is written to disk as it is produced), and
         # over tens of thousands of cases the accumulated list is what exhausts host RAM.
-        trainer.predict(model=model, dataloaders=dataloader, return_predictions=False)
+        try:
+            trainer.predict(model=model, dataloaders=dataloader, return_predictions=False)
+        finally:
+            # Runs on the walltime kill too: submitit signals ~90s before SIGKILL, and that
+            # surfaces as an exception through trainer.predict. A hard kill skips this, which is
+            # what `find <output>/csv -type f -empty -delete` remains the backstop for.
+            dataset.release_unfinished_claims()
 
         # Two empty dicts, holding no references to the model or the data: @utils.task_wrapper
         # unpacks this as `metric_dict, object_dict`, and returning None instead makes the

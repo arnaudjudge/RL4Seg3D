@@ -34,7 +34,12 @@ def read_failures(out):
     rows = [pd.read_csv(f) for f in sorted(fdir.glob("*.csv"))] if fdir.is_dir() else []
     if not rows:
         return pd.DataFrame(columns=["case_id", "error_type", "error", "retryable"])
-    return pd.concat(rows, ignore_index=True)
+    df = pd.concat(rows, ignore_index=True)
+    # older runs predate the time/job columns, and a mix of old and new files leaves NaN in
+    # them, which will not compare against the strings from the newer rows
+    for c in ("time", "job"):
+        df[c] = df[c].fillna("").astype(str) if c in df.columns else ""
+    return df
 
 
 def main():
@@ -114,7 +119,19 @@ def main():
         print(f"\nfailures ({len(failures)} recorded attempts):")
         for (etype, retry), grp in failures.groupby(["error_type", "retryable"]):
             note = "retried once released" if retry else "not retried, counted as failed"
-            print(f"  {etype:<24}{len(grp):>6}   ({note})")
+            last = grp["time"].max()
+            print(f"  {etype:<24}{len(grp):>6}   ({note})"
+                  + (f"   last {last}" if last else ""))
+
+        # a failures dir accumulates across submissions, so break it down per run
+        if failures["job"].astype(bool).any():
+            per_job = failures.assign(array=failures["job"].astype(str).str.split("-").str[0])
+            print("\nby submission (array job id, newest last):")
+            for arr, grp in per_job.groupby("array", sort=False):
+                if not arr:
+                    continue
+                print(f"  {arr:<14}{len(grp):>6} failure(s)   "
+                      f"{grp['time'].min()} .. {grp['time'].max()}")
 
 
 if __name__ == "__main__":

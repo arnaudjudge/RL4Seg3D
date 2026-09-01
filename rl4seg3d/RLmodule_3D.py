@@ -972,7 +972,12 @@ class RLmodule3D(LightningModule):
             job = "-".join(filter(None, [os.environ.get("SLURM_JOB_ID"),
                                          os.environ.get("SLURM_ARRAY_TASK_ID")])) \
                   or f"pid{os.getpid()}"
+            # timestamped and job-stamped so rows stay attributable once several submissions'
+            # files are concatenated -- otherwise only the filename says which run a failure
+            # came from, and that is lost the moment you cat them together
             append_csv_row(out_root / "failures" / f"{job}.csv", {
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "job": job,
                 "case_id": fname,
                 "error_type": type(exc).__name__,
                 "error": detail,

@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy import ndimage
 import torch.nn.functional as F
 from monai.data.utils import compute_importance_map
 from patchless_nnunet.utils.inferers import (
@@ -107,8 +108,28 @@ def build_reference(ckpt_path, reward_names):
     return module, ordered
 
 
-def reference_outputs(module, image, view, tta):
-    """One case through the original inference path, returning (labels, per-net rewards)."""
+def scipy_clean(seg):
+    """The pipeline's own blob cleanup, verbatim from inference_predict_step.
+
+    Kept on scipy on purpose: the packaged model reimplements this in torch, so the
+    comparison is only worth anything if the reference stays the original code.
+    """
+    batch = seg[0].cpu().numpy().transpose((2, 0, 1)).copy()
+    for i in range(len(batch)):
+        lbl, _ = ndimage.label(batch[i] != 0)
+        count = np.bincount(lbl.flat)
+        if len(count) < 2:
+            continue
+        batch[i][lbl != np.argmax(count[1:]) + 1] = 0
+    return torch.from_numpy(batch.transpose((1, 2, 0))[None]).to(seg.device)
+
+
+def reference_outputs(module, image, view, tta, clean=True):
+    """One case through the original inference path, returning (labels, per-net rewards).
+
+    ``clean`` mirrors the package under test: inference_predict_step cleans between the
+    segmentation and the reward nets, so the maps score the cleaned mask.
+    """
     view_id = torch.tensor([exporter.VIEWS[view]], dtype=torch.long)
     module._current_cond = view_id
     module.patch_size = [image.shape[-3], image.shape[-2], 4]
@@ -127,6 +148,8 @@ def reference_outputs(module, image, view, tta):
             seg = module.tta_predict(image)
         else:
             seg = module.predict(image).argmax(dim=1)
+        if clean:
+            seg = scipy_clean(seg)
         rewards = (module.reward_func.predict_full_sequence(seg, image, None, cond=view_id)
                    if module.reward_func.nets else [])
     return seg, rewards
@@ -154,8 +177,8 @@ def run_package(package, image, view, tta):
     return out[0], out[1], out[2]
 
 
-def compare(module, package, image, view, tta, label, results):
-    ref_seg, ref_rewards = reference_outputs(module, image, view, tta)
+def compare(module, package, image, view, tta, label, results, clean=True):
+    ref_seg, ref_rewards = reference_outputs(module, image, view, tta, clean)
     seg, merged, maps = run_package(package, image, view, tta)
 
     disagreeing = int((ref_seg[0] != seg).sum().item())
@@ -215,6 +238,10 @@ def main():
     print(f"  {'PASS' if diff == 0.0 else 'FAIL'}  max|diff| = {diff:.3e}")
 
     package = torch.jit.load(args.package, map_location="cpu").eval()
+    # Match the reference to whatever the package does, so the comparison tests the
+    # implementations rather than a configuration difference.
+    clean = bool(package.cleans_blobs()) if hasattr(package, "cleans_blobs") else False
+    print(f"Package blob cleanup: {'on' if clean else 'off'} -- reference will match")
     reward_names = [n.strip() for n in args.reward_names.split(",") if n.strip()]
     module, ordered = build_reference(args.ckpt, reward_names)
     if hasattr(package, "reward_map_names"):
@@ -229,16 +256,16 @@ def main():
     cases = [(torch.rand(1, 1, 64, 64, 8), "a4c"), (torch.rand(1, 1, 96, 64, 11), "a2c")]
     for image, view in cases:
         compare(module, package, image, view, False,
-                f"random {tuple(image.shape[2:])} view={view} tta=off", results)
+                f"random {tuple(image.shape[2:])} view={view} tta=off", results, clean)
     if not args.no_tta:
         image, view = cases[0]
         compare(module, package, image, view, True,
-                f"random {tuple(image.shape[2:])} view={view} tta=ON", results)
+                f"random {tuple(image.shape[2:])} view={view} tta=ON", results, clean)
 
     print("5. in-plane padding (module pads internally, pipeline pads in preprocessing)")
     raw = torch.rand(1, 1, 50, 44, 8)
     padded, off_h, off_w = pad_to_multiple(raw)
-    ref_seg, ref_rewards = reference_outputs(module, padded, "a3c", False)
+    ref_seg, ref_rewards = reference_outputs(module, padded, "a3c", False, clean)
     seg, _, maps = run_package(package, raw, "a3c", False)
     cropped = ref_seg[0, off_h:off_h + 50, off_w:off_w + 44, :]
     ok = int((cropped != seg).sum().item()) == 0
@@ -256,7 +283,7 @@ def main():
         for f in files[:args.limit]:
             image = load_nifti(f)
             compare(module, package, image, "a4c", not args.no_tta,
-                    f"{f.name} {tuple(image.shape[2:])}", results)
+                    f"{f.name} {tuple(image.shape[2:])}", results, clean)
 
     passed = sum(1 for r in results if r)
     print(f"\n{passed}/{len(results)} checks passed")

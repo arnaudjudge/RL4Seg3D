@@ -11,6 +11,9 @@ give the same answer for the same input:
 * the reflect pad of 6 frames on either side that ``RLmodule_3D.predict`` applies to keep
   border artefacts out of the first and last frames.
 * the 25-pass test-time augmentation of ``RLmodule_3D.tta_predict``.
+* the largest-connected-component cleanup, applied per frame between the segmentation and
+  the reward nets exactly where ``inference_predict_step`` applies it -- so the maps score
+  the cleaned mask, as they do in the pipeline.
 * reward maps as raw per-net sigmoids fused with an elementwise minimum -- matching
   ``RewardUnets3D.predict_full_sequence``, which (unlike ``RewardUnets3D.__call__``,
   used during training) applies neither the per-frame renorm nor the temperature.
@@ -19,9 +22,6 @@ What is NOT in here, and so is not in the packaged model:
 
 * test-time optimization. It needs autograd and mutates the actor's weights per case, so
   it cannot be a TorchScript graph at all.
-* the largest-connected-component cleanup that ``inference_predict_step`` runs before the
-  reward nets. The shipped packages have never included it either, so leaving it out keeps
-  parity with them; ``torchscript_predict_3d.py`` is where to add it if that changes.
 * resampling to the common 0.37mm spacing, which stays with the caller -- see
   ``torchscript_predict_3d.py``.
 
@@ -51,6 +51,16 @@ _BORDER_PAD_FRAMES = 6
 _TTA_CONTRAST = [1.1, 0.9, 1.25, 0.75]
 _TTA_TRANSLATIONS = [40, 60, 80, 120]
 _TTA_ROTATIONS = [5.0, 10.0, -5.0, -10.0]
+
+# Label propagation moves one pixel per pass along a blob's geodesic diameter, so the pass
+# count is data-dependent -- a full-size cardiac frame settles in ~256. The cap is a
+# backstop, not a budget. Convergence is checked every _BLOB_CHECK_EVERY passes because the
+# check costs a device sync.
+_BLOB_MAX_ITER = 4096
+_BLOB_CHECK_EVERY = 8
+# Stands in for +inf as the label of a background pixel: larger than any flat index a frame
+# can hold, and finite so minimum() stays well behaved.
+_BLOB_CEILING = 1.0e9
 
 # TorchScript resolves neither module-level constants nor closures inside a compiled method,
 # so every value above reaches the graph as a function argument or a module attribute set in
@@ -101,6 +111,57 @@ def _window_starts(length: int, window: int, overlap: float) -> List[int]:
     for i in range(num):
         starts.append(int(round(step * float(i))))
     return starts
+
+
+def _keep_largest_blob(seg: Tensor, max_iter: int, check_every: int, ceiling: float) -> Tensor:
+    """Zero everything outside the largest 4-connected blob of each frame.
+
+    Reproduces ``scipy.ndimage.label`` + largest-component selection, which is what
+    ``inference_predict_step`` uses, without needing scipy in the graph:
+
+    * every foreground pixel starts labelled with its own flat index, and each pass replaces
+      a label by the minimum over its 4-neighbourhood. At convergence a component's label is
+      the lowest flat index it contains -- i.e. its first pixel in raster order, which is the
+      order scipy numbers components in.
+    * ``scatter_add_`` counts each label, and ``argmax`` takes the FIRST maximum. Because a
+      label IS its component's first raster position, ties break toward the component that
+      appears earliest, matching ``np.argmax(count[1:]) + 1``.
+
+    Original labels are kept inside the winning blob rather than binarised. An all-background
+    frame stays empty instead of raising, which is what scipy's ``count[1:]`` would do on one.
+    """
+    b = seg.shape[0]
+    h = seg.shape[1]
+    w = seg.shape[2]
+    t = seg.shape[3]
+    # One frame per row: connectivity is per frame, never across time.
+    fg = (seg != 0).permute(0, 3, 1, 2).reshape(-1, 1, h, w)
+    n = fg.shape[0]
+
+    background = torch.full([1, 1, 1, 1], ceiling, dtype=torch.float32, device=seg.device)
+    index = torch.arange(h * w, dtype=torch.float32, device=seg.device).reshape(1, 1, h, w)
+    label = torch.where(fg, index.expand(n, 1, h, w), background)
+
+    for i in range(max_iter):
+        padded = F.pad(label, [1, 1, 1, 1], value=ceiling)
+        neighbours = torch.minimum(
+            torch.minimum(padded[:, :, 0:h, 1:w + 1], padded[:, :, 2:h + 2, 1:w + 1]),
+            torch.minimum(padded[:, :, 1:h + 1, 0:w], padded[:, :, 1:h + 1, 2:w + 2]),
+        )
+        propagated = torch.where(fg, torch.minimum(label, neighbours), background)
+        if i % check_every == check_every - 1 and torch.equal(propagated, label):
+            label = propagated
+            break
+        label = propagated
+
+    # Background is parked in a spare final column so it cannot win the argmax.
+    slots = torch.where(fg, label, torch.full_like(label, float(h * w))).reshape(n, -1).long()
+    counts = torch.zeros([n, h * w + 1], dtype=torch.float32, device=seg.device)
+    counts.scatter_add_(1, slots, torch.ones_like(slots, dtype=torch.float32))
+    winner = counts[:, 0:h * w].argmax(dim=1).reshape(n, 1, 1, 1).float()
+
+    keep = (label == winner).reshape(b, t, h, w).permute(0, 2, 3, 1)
+    return seg * keep
 
 
 class WindowedNet(nn.Module):
@@ -164,10 +225,16 @@ class WindowedNet(nn.Module):
 class _PackageBase(nn.Module):
     """Shared machinery: view lookup, in-plane padding, and the segmentation passes."""
 
-    def __init__(self, segmenter: WindowedNet, views: Dict[str, int]) -> None:
+    def __init__(
+        self, segmenter: WindowedNet, views: Dict[str, int], clean_blobs: bool = True
+    ) -> None:
         super().__init__()
         self.segmenter = segmenter
         self.views = views
+        self.clean_blobs = clean_blobs
+        self.blob_max_iter = _BLOB_MAX_ITER
+        self.blob_check_every = _BLOB_CHECK_EVERY
+        self.blob_ceiling = _BLOB_CEILING
         self.divisible_by = _DIVISIBLE_BY
         self.tta_contrast = _TTA_CONTRAST
         self.tta_translations = _TTA_TRANSLATIONS
@@ -180,6 +247,11 @@ class _PackageBase(nn.Module):
         for name in sorted(self.views.keys()):
             names.append(name)
         return names
+
+    @torch.jit.export
+    def cleans_blobs(self) -> bool:
+        """Whether this package drops all but the largest blob of each frame."""
+        return self.clean_blobs
 
     def _view_id(self, view: str, device: torch.device) -> Tensor:
         key = view.lower()
@@ -254,7 +326,11 @@ class _PackageBase(nn.Module):
             probs = self._tta_probabilities(image, view_id)
         else:
             probs = self._probabilities(image, view_id)
-        return probs.argmax(dim=1)
+        seg = probs.argmax(dim=1)
+        if self.clean_blobs:
+            seg = _keep_largest_blob(
+                seg, self.blob_max_iter, self.blob_check_every, self.blob_ceiling)
+        return seg
 
 
 def _shift_x_left(img: Tensor, amount: int) -> Tensor:
@@ -300,8 +376,9 @@ class FullPackage(_PackageBase):
         reward_nets: List[WindowedNet],
         reward_names: List[str],
         views: Dict[str, int],
+        clean_blobs: bool = True,
     ) -> None:
-        super().__init__(segmenter, views)
+        super().__init__(segmenter, views, clean_blobs)
         self.rewards = nn.ModuleList(reward_nets)
         self.reward_names = reward_names
 

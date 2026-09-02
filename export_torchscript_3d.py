@@ -145,6 +145,10 @@ def main():
                              "Required when --ckpt holds no reward nets.")
     parser.add_argument("--reward-names", default=",".join(DEFAULT_REWARD_NAMES),
                         help="names for rewardnet_0..N-1 inside a full checkpoint, in order")
+    parser.add_argument("--no-clean-blobs", action="store_true",
+                        help="Skip the per-frame largest-connected-component cleanup. It is "
+                             "on by default because predict_3d.py applies it before scoring, "
+                             "so the reward maps describe the cleaned mask either way.")
     parser.add_argument("--no-rewards", action="store_true",
                         help="build a segmentation-only model (forward returns just the mask)")
     parser.add_argument("--half", action="store_true",
@@ -177,9 +181,12 @@ def main():
     actor = build_net(actor_sd)
     segmenter = WindowedNet(actor, net_kwargs()["num_classes"])
 
+    clean_blobs = not args.no_clean_blobs
+    print(f"Largest-blob cleanup: {'on' if clean_blobs else 'off'}")
+
     if args.no_rewards:
-        model = SegmentationPackage(segmenter, dict(VIEWS)).eval()
-        preserved = ["view_names"]
+        model = SegmentationPackage(segmenter, dict(VIEWS), clean_blobs).eval()
+        preserved = ["view_names", "cleans_blobs"]
     else:
         # Order the maps the way the checkpoint/config orders the nets, and put any
         # separately supplied net that is not in that list at the end.
@@ -189,8 +196,8 @@ def main():
             WindowedNet(build_net(reward_sds[n], **REWARD_NET_OVERRIDES), 1) for n in ordered
         ]
         print(f"Reward maps, in output order: {ordered}")
-        model = FullPackage(segmenter, reward_nets, ordered, dict(VIEWS)).eval()
-        preserved = ["view_names", "reward_map_names"]
+        model = FullPackage(segmenter, reward_nets, ordered, dict(VIEWS), clean_blobs).eval()
+        preserved = ["view_names", "reward_map_names", "cleans_blobs"]
 
     if not args.skip_checks:
         diff = check_matches_eager(actor, actor_sd, 1, net_kwargs()["num_classes"], num_views)

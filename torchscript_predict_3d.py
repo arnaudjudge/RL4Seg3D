@@ -112,6 +112,22 @@ def restore_image(processed_img, original_shape, order="linear"):
     return resize_in_plane(processed_img, H0, W0, order)
 
 
+def resolve_device(requested=None):
+    """Pick the device to run on: what was asked for, else the best available.
+
+    Order is cuda -> mps -> cpu. An explicit choice is honoured as given rather than
+    silently downgraded, so a machine that was meant to use its GPU fails loudly instead
+    of quietly taking 25x longer on the CPU.
+    """
+    if requested:
+        return torch.device(requested)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def call_model(model, img_tensor, view, tta):
     """Run the model, whether or not it takes a view.
 
@@ -139,7 +155,7 @@ def reward_names(model, count):
 
 
 def process_single_file(input_path, output_dir, model, tta=True, view=None,
-                        equalize_hist=False):
+                        equalize_hist=False, device="cuda"):
     img_nii = nib.load(input_path)
     img, original_spacing, original_shape = adjust_image(img_nii, equalize_hist=equalize_hist)
 
@@ -147,7 +163,7 @@ def process_single_file(input_path, output_dir, model, tta=True, view=None,
     if T > min(H, W):
         print(f"Warning: {input_path} — Temporal dimension might not be last.")
 
-    img_tensor = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).cuda()  # (1, 1, H, W, T)
+    img_tensor = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, H, W, T)
     with torch.no_grad():
         out = call_model(model, img_tensor, view, tta)
 
@@ -162,15 +178,24 @@ def process_single_file(input_path, output_dir, model, tta=True, view=None,
         nib.save(nib.Nifti1Image(restored, affine=img_nii.affine),
                  output_dir / f"{in_name}_{suffix}.nii.gz")
 
+    # A segmentation-only package returns the mask alone; the full one returns
+    # (mask, fused reward, per-net rewards). Both are accepted so the same command works
+    # whichever file was passed to --ckpt.
+    if isinstance(out, torch.Tensor):
+        seg, fused, per_net = out, None, None
+    else:
+        seg, fused, per_net = out[0], out[1], out[2]
+
     # Nearest for the label map, linear for the reward maps: resampling labels linearly
     # would fabricate boundary classes.
-    save(out[0].cpu().numpy(), "segmentation", "nearest")
-    save(out[1].cpu().numpy(), "reward_fusion", "linear")
+    save(seg.cpu().numpy(), "segmentation", "nearest")
 
-    # out[2] is (N, H, W, T), one map per reward net, in the order reward_map_names() gives.
-    per_net = out[2].cpu().numpy()
-    for name, reward_map in zip(reward_names(model, len(per_net)), per_net):
-        save(reward_map, f"reward_{name}", "linear")
+    if per_net is not None:
+        save(fused.cpu().numpy(), "reward_fusion", "linear")
+        # per_net is (N, H, W, T), one map per reward net, in reward_map_names() order.
+        per_net = per_net.cpu().numpy()
+        for name, reward_map in zip(reward_names(model, len(per_net)), per_net):
+            save(reward_map, f"reward_{name}", "linear")
 
     print(f"Done processing: {input_path}")
 
@@ -191,9 +216,16 @@ def main():
                              "before inference. The training images were normalised this way, "
                              "so raw images need it -- but images from an already-normalised "
                              "dataset must NOT be equalized twice.")
+    parser.add_argument("--device", "-d", default=None,
+                        help="Device to run on (cuda, cuda:1, mps, cpu). Defaults to cuda, "
+                             "then mps, then cpu, by availability. NOTE: TTA is 25 full "
+                             "inference passes, so it is impractically slow on cpu -- pair "
+                             "--device cpu with --no_tta.")
     args = parser.parse_args()
 
-    model = torch.jit.load(args.ckpt, map_location='cuda')
+    device = resolve_device(args.device)
+    print(f"Running on {device}")
+    model = torch.jit.load(args.ckpt, map_location=device)
     model.eval()
 
     conditioned = hasattr(model, "view_names")
@@ -226,13 +258,13 @@ def main():
             try:
                 # beware of negation logic for no_tta arg
                 process_single_file(file, args.output, model, args.no_tta, view_for(file),
-                                    args.equalize)
+                                    args.equalize, device)
             except Exception as e:
                 print(f"Failed on {file}: {e}")
     else:
         print(f"Processing WITH{'OUT' if not args.no_tta else ''} Test-time augmentation (TTA)")
         process_single_file(args.input, args.output, model, args.no_tta,
-                            view_for(args.input), args.equalize)
+                            view_for(args.input), args.equalize, device)
 
     print(f"\nOutputs saved to {args.output}")
 

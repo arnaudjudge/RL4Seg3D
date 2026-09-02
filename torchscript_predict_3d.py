@@ -115,16 +115,14 @@ def restore_image(processed_img, original_shape, order="linear"):
 def resolve_device(requested=None):
     """Pick the device to run on: what was asked for, else the best available.
 
-    Order is cuda -> mps -> cpu. An explicit choice is honoured as given rather than
-    silently downgraded, so a machine that was meant to use its GPU fails loudly instead
-    of quietly taking 25x longer on the CPU.
+    Auto-detection is cuda then cpu. Any device may still be named explicitly, and an
+    explicit choice is honoured as given rather than silently downgraded, so a machine that
+    was meant to use its GPU fails loudly instead of quietly taking 25x longer on the CPU.
     """
     if requested:
         return torch.device(requested)
     if torch.cuda.is_available():
         return torch.device("cuda")
-    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        return torch.device("mps")
     return torch.device("cpu")
 
 
@@ -132,16 +130,17 @@ def call_model(model, img_tensor, view, tta):
     """Run the model, whether or not it takes a view.
 
     Models exported before view conditioning have the signature ``(image, tta)``; the FiLM
-    ones take ``(image, view, tta)``. Rather than make the caller know which file they were
-    given, try the conditioned signature and fall back.
+    ones take ``(image, view, tta)``. Which it is has already been settled by whether the
+    model exposes view_names(), and view is None exactly when it does not.
+
+    Deliberately no try/except around the conditioned call: catching RuntimeError to detect
+    an unconditioned model also catches every failure raised from inside the model, and then
+    reports it as "this model takes no view argument" while re-running and failing a second
+    time on the signature. The real error is what should surface.
     """
     if view is None:
         return model(img_tensor, tta)
-    try:
-        return model(img_tensor, view, tta)
-    except (RuntimeError, TypeError):
-        print("Note: this model takes no view argument; running unconditioned.")
-        return model(img_tensor, tta)
+    return model(img_tensor, view, tta)
 
 
 def reward_names(model, count):
@@ -217,8 +216,8 @@ def main():
                              "so raw images need it -- but images from an already-normalised "
                              "dataset must NOT be equalized twice.")
     parser.add_argument("--device", "-d", default=None,
-                        help="Device to run on (cuda, cuda:1, mps, cpu). Defaults to cuda, "
-                             "then mps, then cpu, by availability. NOTE: TTA is 25 full "
+                        help="Device to run on (cuda, cuda:1, mps, cpu). Defaults to cuda "
+                             "when one is visible, else cpu. NOTE: TTA is 25 full "
                              "inference passes, so it is impractically slow on cpu -- pair "
                              "--device cpu with --no_tta.")
     args = parser.parse_args()

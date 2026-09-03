@@ -611,6 +611,11 @@ class RLmodule3D(LightningModule):
 
     def predict_step(self, batch: dict[str, Tensor], batch_idx: int, dataloader_idx: int = 0) -> Any:
         if self.hparams.inference:
+            # collate_skip_none yields None when every sample in the batch was dropped (a
+            # sequence too short to predict). Nothing to do, and the dataset has already
+            # recorded why.
+            if batch is None:
+                return None
             # One bad case must not take the rest of the task with it. Without this a single OOM
             # aborts every case still queued behind it in the same process, and on a re-run the
             # same case aborts whichever task picks it up again -- so a handful of oversized
@@ -955,7 +960,7 @@ class RLmodule3D(LightningModule):
         Either way a row lands in <output>/failures/<job>.csv. The file is per process, so no
         two writers ever share one and concurrent submissions need no coordination.
         """
-        properties_dict = batch.get("image_meta_dict", {})
+        properties_dict = batch.get("image_meta_dict", {}) if isinstance(batch, dict) else {}
         fname = (properties_dict.get("case_identifier") or ["<unknown>"])[0]
         csv_path = (properties_dict.get("case_csv_path") or [""])[0]
         job_ended = isinstance(exc, _JobEndedError)

@@ -24,6 +24,7 @@ from monai.transforms import ToTensord
 from omegaconf import DictConfig
 
 from patchless_nnunet import utils, setup_root
+from rl4seg3d.utils.file_utils import append_csv_row
 from rl4seg3d.utils.preprocessing import apply_eq_adapthist, rescale
 
 
@@ -395,6 +396,22 @@ class LazyEchoDataset(Dataset):
                 self.existing_outputs = set(os.listdir(self.case_csv_dir))
         self.input_files = self._collect_files(input_path, file_match_regex)
 
+    def _retire_case(self, case_id, error_type, detail):
+        """Mark a case as permanently unpredictable, so no future run offers it again.
+
+        Fills the claim, which is what distinguishes "will never work" from "ran out of
+        resources", and records it alongside the runtime failures so it shows up in the same
+        summary rather than only as a line in a log.
+        """
+        if not self.case_csv_dir:
+            return
+        row = {"case_id": case_id, "failed": True, "error_type": error_type, "error": detail}
+        append_csv_row(self.case_csv_dir / f"{case_id}.csv", row)
+        append_csv_row(self.case_csv_dir.parent / "failures" / "skipped.csv",
+                       {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "job": "dataset",
+                        "case_id": case_id, "error_type": error_type, "error": detail,
+                        "retryable": False})
+
     def release_unfinished_claims(self):
         """Hand back the claims this process took but never filled.
 
@@ -563,8 +580,12 @@ class LazyEchoDataset(Dataset):
         data, aff, spacing = load_image(input_file_p)
 
         if data.shape[-1] < 4:
-            print(f"Sequence too short with {data.shape[-1]} frames, skipping.")
-            # Return None and filter in collate, or raise to skip
+            # The sliding window needs 4 frames, so this can never succeed. Retire the case
+            # rather than leaving its claim empty: an empty claim is released on exit and would
+            # be re-claimed, re-read and re-skipped by every subsequent run, forever.
+            self._retire_case(case_id, "SequenceTooShort",
+                              f"{data.shape[-1]} frames, need at least 4")
+            print(f"Sequence too short with {data.shape[-1]} frames, skipping {case_id}.")
             return None
 
         data = data[None,]

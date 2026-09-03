@@ -45,6 +45,19 @@ except Exception:  # submitit absent (local runs)
         """Never raised; placeholder so the isinstance check below is always valid."""
 
 
+# Failures that surface as a bare RuntimeError but are really the GPU running out of room, so
+# a larger allocation can fix them. cuDNN reports a missing kernel when it cannot get the
+# workspace it wants, which reads as though the shape were unsupported; treating these as
+# retryable costs an extra attempt at worst, where retiring them permanently loses the case.
+_RETRYABLE_MESSAGES = (
+    "unable to find an engine",        # cuDNN could not allocate a workspace
+    "CUDNN_STATUS_NOT_SUPPORTED",
+    "CUDNN_STATUS_ALLOC_FAILED",
+    "CUBLAS_STATUS_ALLOC_FAILED",
+    "out of memory",                   # OOM that arrives as a plain RuntimeError
+)
+
+
 # Reward-net subsets to fuse and report alongside the full merge, in the csv written per case.
 # Each is scored exactly as `merged` is; a subset whose nets are not all loaded is skipped.
 _FUSION_SUBSETS = [("anatomical", "landmarks")]
@@ -964,9 +977,12 @@ class RLmodule3D(LightningModule):
         fname = (properties_dict.get("case_identifier") or ["<unknown>"])[0]
         csv_path = (properties_dict.get("case_csv_path") or [""])[0]
         job_ended = isinstance(exc, _JobEndedError)
-        retryable = job_ended or isinstance(exc, torch.cuda.OutOfMemoryError)
+        message = str(exc)
+        retryable = (job_ended
+                     or isinstance(exc, torch.cuda.OutOfMemoryError)
+                     or any(m in message for m in _RETRYABLE_MESSAGES))
 
-        detail = str(exc).replace("\n", " ")[:300]
+        detail = message.replace("\n", " ")[:300]
         print(f"FAILED {fname}: {type(exc).__name__}: {detail}"
               f" ({'will be retried once its claim is released' if retryable else 'not retried'})")
         traceback.print_exc()

@@ -13,6 +13,7 @@ Usage:
 """
 import argparse
 import os
+import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +27,29 @@ def case_ids(csv):
         if c in df.columns:
             return set(df[c].dropna().astype(str))
     raise SystemExit(f"no id column in {csv}; looked for {list(ID_COLUMNS)}")
+
+
+def retired_claims(claims):
+    """Case ids whose claim holds a failure row, i.e. cases that will not be retried.
+
+    A retired claim is identifiable by its header -- `case_id,failed,...` where a successful one
+    starts `case_id,view_id,n_frames,...` -- so one grep pass over the directory settles it
+    without opening tens of thousands of files from python. Falls back to reading them if grep
+    is unavailable.
+    """
+    if not claims.is_dir():
+        return set()
+    try:
+        out = subprocess.run(["grep", "-rl", "^case_id,failed", str(claims)],
+                             capture_output=True, text=True, check=False)
+        return {Path(f).stem for f in out.stdout.split()}
+    except FileNotFoundError:
+        found = set()
+        for f in claims.glob("*.csv"):
+            with open(f) as fh:
+                if fh.readline(20).startswith("case_id,failed"):
+                    found.add(f.stem)
+        return found
 
 
 def read_failures(out):
@@ -63,12 +87,12 @@ def main():
     settled = {f[:-4] for f in files if (claims / f).stat().st_size}
     held = {f[:-4] for f in files if not (claims / f).stat().st_size}
 
-    # retryable=False is exactly the case whose claim gets filled, so the failures log identifies
-    # them without reading 46k claim files
+    # Which cases are retired has to come from the claims, not from the failures log: the log
+    # is append-only history, so a case that was retired, released by hand and then succeeded
+    # still has its retryable=False row and would be counted as failed forever.
     failures = read_failures(out)
-    retired = set(failures[~failures.retryable]["case_id"].astype(str)) if len(failures) else set()
-    done = settled - retired
-    failed = settled & retired
+    failed = retired_claims(claims)
+    done = settled - failed
 
     csvs = []
     for item in args.lists:
@@ -116,12 +140,20 @@ def main():
         if not len(failures):
             print("\nno failures recorded")
             return
-        print(f"\nfailures ({len(failures)} recorded attempts):")
+        # The log is append-only history, so an attempt recorded here says nothing about where
+        # the case stands now: reconcile against the claims rather than let the counts imply it.
+        seen = set(failures["case_id"].astype(str))
+        print(f"\nfailures ({len(failures)} recorded attempts over "
+              f"{len(seen)} distinct case(s)):")
         for (etype, retry), grp in failures.groupby(["error_type", "retryable"]):
-            note = "retried once released" if retry else "not retried, counted as failed"
             last = grp["time"].max()
-            print(f"  {etype:<24}{len(grp):>6}   ({note})"
+            print(f"  {etype:<24}{len(grp):>6}   (logged retryable={bool(retry)})"
                   + (f"   last {last}" if last else ""))
+        print("  where those cases stand now:"
+              f"  done {len(seen & done)},"
+              f"  retired {len(seen & failed)},"
+              f"  held {len(seen & held)},"
+              f"  awaiting {len(seen - settled - held)}")
 
         # a failures dir accumulates across submissions, so break it down per run
         if failures["job"].astype(bool).any():

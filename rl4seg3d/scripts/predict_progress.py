@@ -32,24 +32,25 @@ def case_ids(csv):
 def retired_claims(claims):
     """Case ids whose claim holds a failure row, i.e. cases that will not be retried.
 
-    A retired claim is identifiable by its header -- `case_id,failed,...` where a successful one
-    starts `case_id,view_id,n_frames,...` -- so one grep pass over the directory settles it
-    without opening tens of thousands of files from python. Falls back to reading them if grep
-    is unavailable.
+    A failure row's second field is the literal True, where a result row's is the view id. Two
+    shapes have to be recognised: with a header (`case_id,failed,...`) and without, because
+    claims written before append_csv_row treated an empty file as new have no header at all.
+
+    One grep pass over the directory rather than opening tens of thousands of files; a python
+    scan is the fallback where grep is absent.
     """
     if not claims.is_dir():
         return set()
+    pattern = r"^(case_id,failed|[^,]*,True),"
     try:
-        out = subprocess.run(["grep", "-rl", "^case_id,failed", str(claims)],
+        out = subprocess.run(["grep", "-rlE", pattern, str(claims)],
                              capture_output=True, text=True, check=False)
         return {Path(f).stem for f in out.stdout.split()}
     except FileNotFoundError:
-        found = set()
-        for f in claims.glob("*.csv"):
-            with open(f) as fh:
-                if fh.readline(20).startswith("case_id,failed"):
-                    found.add(f.stem)
-        return found
+        import re
+        rx = re.compile(pattern)
+        return {f.stem for f in claims.glob("*.csv")
+                if rx.match(open(f).readline(40))}
 
 
 def read_failures(out):

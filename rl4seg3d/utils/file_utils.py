@@ -38,7 +38,9 @@ def append_csv_row(path, row):
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not path.exists()
+    # Empty counts as new: a per-case csv is created empty as a claim before it is filled, so
+    # testing existence alone left every one of them without a header row.
+    write_header = not path.exists() or path.stat().st_size == 0
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()))
         if write_header:
